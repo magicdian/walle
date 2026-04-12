@@ -1,0 +1,7 @@
+[package]
+name = "walle-ebpf"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+walle-common = { path = "../walle-common" }

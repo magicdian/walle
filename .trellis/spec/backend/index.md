@@ -6,7 +6,15 @@
 
 ## Overview
 
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+This directory contains the bootstrap backend guidelines for `walle`.
+
+`walle` is currently a greenfield Rust + eBPF/XDP CLI project, so these files document:
+
+* decisions already made during product planning
+* conventions the first implementation must follow
+* explicit non-goals for MVP
+
+These guidelines should be updated again after the first Rust workspace and eBPF crates exist, so the examples section can reference real code instead of target locations.
 
 ---
 
@@ -14,24 +22,20 @@ This directory contains guidelines for backend development. Fill in each file wi
 
 | Guide | Description | Status |
 |-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| [Directory Structure](./directory-structure.md) | Module organization and file layout | Bootstrapped v0 |
+| [Database Guidelines](./database-guidelines.md) | Runtime state, persistence, map-backed data | Bootstrapped v0 |
+| [Error Handling](./error-handling.md) | Error types, handling strategies | Bootstrapped v0 |
+| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | Bootstrapped v0 |
+| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | Bootstrapped v0 |
 
 ---
 
-## How to Fill These Guidelines
+## How to Use These Guidelines
 
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
+1. Treat these files as the source of truth while scaffolding the first implementation.
+2. When a code path exists, replace target-path examples with real file references.
+3. Keep these docs aligned with [`docs/architecture/walle-system-design.md`](E:/coding/github_projects/walle/docs/architecture/walle-system-design.md).
+4. If implementation diverges from these files, update the docs immediately instead of letting them drift.
 
 ---
 

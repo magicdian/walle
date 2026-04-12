@@ -6,46 +6,40 @@
 
 ## Overview
 
-<!--
-Document your project's quality standards here.
-
-Questions to answer:
-- What patterns are forbidden?
-- What linting rules do you enforce?
-- What are your testing requirements?
-- What code review standards apply?
--->
-
-(To be filled by the team)
+Frontend work is not part of MVP, but any future UI should meet the same clarity and safety expectations as the backend.
 
 ---
 
 ## Forbidden Patterns
 
-<!-- Patterns that should never be used and why -->
-
-(To be filled by the team)
+* Shipping a UI without a documented control-plane contract.
+* Embedding firewall policy logic in components.
+* Unclear destructive actions for ban, allow, or mode changes.
+* Silent form coercions for security-sensitive values.
 
 ---
 
 ## Required Patterns
 
-<!-- Patterns that must always be used -->
-
-(To be filled by the team)
+* Explicit validation for operator input.
+* Clear state transitions for destructive or high-impact actions.
+* Accessibility and keyboard support for any operational dashboard or console.
 
 ---
 
 ## Testing Requirements
 
-<!-- What level of testing is expected -->
+If a UI is added later:
 
-(To be filled by the team)
+* unit-test state transforms and validation
+* integration-test mutation flows for rule changes
+* verify error rendering for daemon and validation failures
 
 ---
 
 ## Code Review Checklist
 
-<!-- What reviewers should check -->
-
-(To be filled by the team)
+* Does the UI reflect the real backend contract?
+* Are risky operations clearly labeled and confirmable?
+* Is state synchronized correctly after mutations?
+* Does the change keep policy logic outside the presentation layer?

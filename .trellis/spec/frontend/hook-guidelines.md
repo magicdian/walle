@@ -6,46 +6,37 @@
 
 ## Overview
 
-<!--
-Document your project's hook conventions here.
+There are no React hooks in MVP because there is no React application.
 
-Questions to answer:
-- What custom hooks do you have?
-- How do you handle data fetching?
-- What are the naming conventions?
-- How do you share stateful logic?
--->
-
-(To be filled by the team)
+If a future UI uses React, hooks should be reserved for UI-side stateful composition and data fetching, not for embedding firewall policy logic.
 
 ---
 
 ## Custom Hook Patterns
 
-<!-- How to create and structure custom hooks -->
-
-(To be filled by the team)
+* Use hooks to wrap view state, polling, subscriptions, and mutation flows.
+* Keep hooks focused on one capability.
+* Put protocol or policy validation in shared contracts, not in ad-hoc hook code.
 
 ---
 
 ## Data Fetching
 
-<!-- How data fetching is handled (React Query, SWR, etc.) -->
+Future UI data fetching should go through a single documented mechanism. Do not mix multiple fetching libraries casually.
 
-(To be filled by the team)
+If real-time status is needed, prefer subscription or polling abstractions that can be tested without tying components to transport details.
 
 ---
 
 ## Naming Conventions
 
-<!-- Hook naming rules (use*, etc.) -->
-
-(To be filled by the team)
+* Hooks must be prefixed with `use`.
+* Names should reflect the user-visible capability, for example `useBanList`, `useAccessMode`, `useIcmpRules`.
 
 ---
 
 ## Common Mistakes
 
-<!-- Hook-related mistakes your team has made -->
-
-(To be filled by the team)
+* Turning hooks into hidden service locators.
+* Fetching unvalidated backend data directly in multiple places.
+* Spreading the same side-effect logic across many hooks instead of centralizing it.

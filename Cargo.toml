@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/walle-cli",
+    "crates/walle-common",
+    "crates/walle-daemon",
+    "crates/walle-ebpf",
+    "crates/walle-policy",
+    "xtask",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

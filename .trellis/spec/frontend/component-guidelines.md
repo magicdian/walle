@@ -6,54 +6,51 @@
 
 ## Overview
 
-<!--
-Document your project's component conventions here.
+No browser component system exists in MVP.
 
-Questions to answer:
-- What component patterns do you use?
-- How are props defined?
-- How do you handle composition?
-- What accessibility standards apply?
--->
-
-(To be filled by the team)
+If UI work is introduced later, components should be thin, composable, and clearly separated from security policy logic.
 
 ---
 
 ## Component Structure
 
-<!-- Standard structure of a component file -->
+Future component files should prefer:
 
-(To be filled by the team)
+* a single exported component per file
+* colocated tests when practical
+* minimal view-only helpers inside the same file
+* extraction of non-visual logic into hooks or controller modules
 
 ---
 
 ## Props Conventions
 
-<!-- How props should be defined and typed -->
-
-(To be filled by the team)
+* Props should use explicit interfaces or type aliases.
+* Avoid `any`, broad index signatures, or unvalidated config blobs.
+* Components should receive normalized UI-facing data, not raw daemon responses when a view model layer is warranted.
 
 ---
 
 ## Styling Patterns
 
-<!-- How styles are applied (CSS modules, styled-components, Tailwind, etc.) -->
+This project has no styling system today.
 
-(To be filled by the team)
+If a web UI is added later:
+
+* choose one styling approach and document it first
+* avoid mixing multiple styling systems in the same app
+* preserve a utilitarian operational tool aesthetic over marketing-style UI
 
 ---
 
 ## Accessibility
 
-<!-- A11y requirements and patterns -->
-
-(To be filled by the team)
+Any future UI must support keyboard navigation, clear status semantics, and readable state transitions. Firewall tooling is operational software, so error visibility matters as much as visual polish.
 
 ---
 
 ## Common Mistakes
 
-<!-- Component-related mistakes your team has made -->
-
-(To be filled by the team)
+* Embedding business logic directly in view components.
+* Hiding destructive or security-sensitive actions behind unclear UI affordances.
+* Creating a UI package before there is a stable control-plane contract.

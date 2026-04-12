@@ -1,0 +1,6 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".\\.trellis\\spec\\backend\\directory-structure.md", "reason": "Detector and daemon module ownership for live ingestion"}
+{"file": ".\\.trellis\\spec\\backend\\logging-guidelines.md", "reason": "Structured logs for detector source selection and ingest results"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "Phase 3 SSH detector flow and log source strategy"}
+{"file": ".\\.trellis\\spec\\backend\\error-handling.md", "reason": "Typed ingest and source errors"}

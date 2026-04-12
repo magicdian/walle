@@ -1,0 +1,6 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".\\.trellis\\spec\\backend\\database-guidelines.md", "reason": "Map-backed runtime state contract and versioned layout expectations"}
+{"file": ".\\.trellis\\spec\\backend\\error-handling.md", "reason": "Typed errors for environment and map sync failures"}
+{"file": ".\\.trellis\\spec\\backend\\directory-structure.md", "reason": "Keep runtime, policy, and ebpf ownership boundaries clean"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "Phase 2 map layout and environment check requirements"}

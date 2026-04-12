@@ -6,49 +6,92 @@
 
 ## Overview
 
-<!--
-Document your project's backend directory structure here.
+`walle` should use a Rust workspace with clear crate boundaries between:
 
-Questions to answer:
-- How are modules/packages organized?
-- Where does business logic live?
-- Where are API endpoints defined?
-- How are utilities and helpers organized?
--->
+* CLI entrypoints
+* long-running daemon logic
+* shared policy and type definitions
+* eBPF/XDP program code
+* build and developer automation
 
-(To be filled by the team)
+Because the project is greenfield, this file is a contract for the first scaffold rather than a summary of existing code.
 
 ---
 
 ## Directory Layout
 
-```
-<!-- Replace with your actual structure -->
-src/
-├── ...
-└── ...
+```text
+Cargo.toml
+crates/
+  walle-cli/
+    src/
+  walle-daemon/
+    src/
+      detector/
+      policy/
+      runtime/
+  walle-common/
+    src/
+  walle-policy/
+    src/
+  walle-ebpf/
+    src/
+xtask/
+  src/
+docs/
+  architecture/
+fixtures/
 ```
 
 ---
 
 ## Module Organization
 
-<!-- How should new features/modules be organized? -->
+Use these ownership rules:
 
-(To be filled by the team)
+* `walle-cli`
+  * command parsing
+  * output formatting
+  * no packet-path business logic
+* `walle-daemon`
+  * service lifecycle
+  * detector pipelines
+  * map synchronization
+  * runtime orchestration
+* `walle-common`
+  * plain shared structs and enums that do not pull in heavy runtime dependencies
+* `walle-policy`
+  * config schema
+  * validation
+  * rule compilation from operator-facing config into runtime-friendly structures
+* `walle-ebpf`
+  * eBPF-safe data structures
+  * XDP parsing and actions
+  * no allocations, panics, or control-plane concerns
+* `xtask`
+  * local development commands such as build, test, bundle, and attach helpers
+
+Avoid "misc" crates or generic utility dumping grounds. If a new module cannot be clearly placed, revisit the architecture before adding it.
 
 ---
 
 ## Naming Conventions
 
-<!-- File and folder naming rules -->
+* Crates use `kebab-case` names prefixed with `walle-` when they are product-owned workspace crates.
+* Rust modules and files use `snake_case`.
+* eBPF-facing structs should use explicit names that reflect map or packet semantics, for example `AccessModeConfig`, `BanEntryV4`, `IcmpRule`.
+* Avoid vague names such as `manager`, `helper`, `utils`, or `common` at the module level unless the scope is extremely obvious.
+* Separate IPv4 and IPv6 types when it keeps the fast path simpler and avoids ambiguous layouts.
 
-(To be filled by the team)
+Prefer files organized by capability, not by framework artifact. For example, `detector/ssh.rs` is better than `services/service1.rs`.
 
 ---
 
 ## Examples
 
-<!-- Link to well-organized modules as examples -->
+Current scaffold examples:
 
-(To be filled by the team)
+* [`walle-cli main`](E:/coding/github_projects/walle/crates/walle-cli/src/main.rs): CLI-only entrypoint and command tree
+* [`walle-daemon lib`](E:/coding/github_projects/walle/crates/walle-daemon/src/lib.rs): daemon orchestration boundary
+* [`walle-daemon detector`](E:/coding/github_projects/walle/crates/walle-daemon/src/detector.rs): SSH detector module ownership
+* [`walle-ebpf lib`](E:/coding/github_projects/walle/crates/walle-ebpf/src/lib.rs): packet-path placeholder code

@@ -6,46 +6,45 @@
 
 ## Overview
 
-<!--
-Document your project's state management conventions here.
+There is no frontend state-management system in MVP.
 
-Questions to answer:
-- What state management solution do you use?
-- How is local vs global state decided?
-- How do you handle server state?
-- What are the patterns for derived state?
--->
+If a UI is added later, it should distinguish clearly between:
 
-(To be filled by the team)
+* local presentation state
+* server or daemon state
+* user input being edited
 
 ---
 
 ## State Categories
 
-<!-- Local state, global state, server state, URL state -->
-
-(To be filled by the team)
+* Local state
+  * dialog visibility
+  * form progress
+* Server state
+  * mode status
+  * ban list
+  * counters
+* Derived state
+  * filtered views
+  * grouped diagnostics
 
 ---
 
 ## When to Use Global State
 
-<!-- Criteria for promoting state to global -->
-
-(To be filled by the team)
+Only promote state to global when multiple distant UI surfaces need the same live value and prop passing becomes noisy. Do not create a global store for convenience alone.
 
 ---
 
 ## Server State
 
-<!-- How server data is cached and synchronized -->
-
-(To be filled by the team)
+Server or daemon state should be treated as authoritative. UI caches must be invalidated explicitly after mutations that change firewall behavior.
 
 ---
 
 ## Common Mistakes
 
-<!-- State management mistakes your team has made -->
-
-(To be filled by the team)
+* Mixing draft form state with live daemon state.
+* Re-encoding backend enums into unrelated frontend string literals.
+* Building optimistic UI flows for destructive actions without a rollback story.

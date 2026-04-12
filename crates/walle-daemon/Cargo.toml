@@ -1,0 +1,15 @@
+[package]
+name = "walle-daemon"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+walle-common = { path = "../walle-common" }
+walle-policy = { path = "../walle-policy" }
