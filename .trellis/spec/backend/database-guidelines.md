@@ -135,6 +135,158 @@ Current scaffold examples:
 * [`walle-policy config schema`](E:/coding/github_projects/walle/crates/walle-policy/src/lib.rs): operator-facing config separated from runtime structs
 * [`walle-daemon runtime controller`](E:/coding/github_projects/walle/crates/walle-daemon/src/runtime.rs): runtime config sync boundary
 
+## Scenario: Default Config File And Interface Policy Contract
+
+### 1. Scope / Trigger
+
+* Trigger: Any change to on-host config file loading, operator-facing policy schema, multi-interface attachment behavior, or the boundary between global detectors and interface-scoped packet filters.
+
+### 2. Signatures
+
+* `walle run`
+* `WalleConfig::load_default() -> Result<WalleConfig, PolicyError>`
+* `WalleConfig::load_from_path(&Path) -> Result<WalleConfig, PolicyError>`
+* `WalleConfig::validate() -> Result<(), PolicyError>`
+* `WalleConfig::interfaces() -> &[InterfacePolicy]`
+* `WalleDaemon::new(WalleConfig, DaemonOptions) -> Result<WalleDaemon, DaemonError>`
+* `WalleDaemon::startup() -> Result<(), DaemonError>`
+
+### 3. Contracts
+
+* `walle run` must default to loading `/etc/walle/config.toml` when no override path is provided.
+* `/etc/walle/config.toml` stores desired operator policy only; runtime locks, pid files, sockets, and pinned BPF maps must not be treated as editable config state.
+* The operator-facing config schema must separate:
+  * global detector policy
+  * global access policy
+  * global logging policy
+  * interface-scoped packet filters and attachment targets
+* SSH protection is a global detector contract in v1:
+  * one detector policy is configured for the host
+  * detector-produced bans remain global runtime deny state
+  * v1 does not introduce interface-scoped SSH deny maps
+* ICMP policy is interface-scoped in v1:
+  * each protected interface declares its own ICMP filter mode
+  * interfaces may differ, for example one interface uses `AllowRulesActive` while another uses `Disabled`
+* Protected interfaces must be declared explicitly in config; startup must not guess the default egress or infer attachment targets from host routing state.
+* Exact-match ICMP payload rules must use an operator-facing hex string field such as `payload_hex = "09070108"` in config and compile that value into canonical `IcmpRule` bytes.
+* User-space log verbosity must be configured in `/etc/walle/config.toml` through a typed global log-level field rather than relying on deployment-only environment variables.
+* Empty interface names, duplicate interface declarations, invalid hex payload strings, and enabled ICMP rules with empty payloads are validation failures.
+
+### 4. Validation & Error Matrix
+
+* Missing default config file at `/etc/walle/config.toml` -> typed config load failure with the path preserved.
+* TOML parse failure -> typed config parse failure with source context.
+* Duplicate interface declaration -> typed validation failure.
+* Empty interface name -> typed validation failure.
+* Invalid `payload_hex` -> typed validation failure.
+* `icmp.mode = "allow_rules_active"` with an enabled rule whose payload exceeds `ICMP_RULE_PAYLOAD_CAPACITY` -> typed validation failure.
+* Valid config with multiple interfaces and different ICMP modes -> config validation succeeds and daemon startup plans one attachment per declared interface.
+* Valid config with global SSH enabled and ICMP disabled on one interface -> daemon startup succeeds and the interface still participates in access-policy enforcement without ICMP allow rules.
+
+### 5. Good/Base/Bad Cases
+
+* Good:
+  * `/etc/walle/config.toml` defines `eth0` with ICMP allow rules and `eth1` with ICMP disabled, and startup preserves that difference.
+  * `/etc/walle/config.toml` defines `policy.logging.level = "info"` so local runs and systemd services share the same verbosity contract.
+  * SSH detector policy is configured once and applies to host-level ban decisions without duplicating detector blocks per interface.
+  * operators write `payload_hex` values that compile into exact-match `IcmpRule` entries without exposing raw byte arrays in TOML.
+* Base:
+  * a single declared interface with ICMP disabled remains valid.
+  * multiple declared interfaces may share the same ICMP policy without requiring a separate abstraction first.
+* Bad:
+  * deriving protected interfaces implicitly from the system default route.
+  * mixing detector configuration into per-interface filter blocks and forcing duplicate SSH policy declarations.
+  * storing runtime-only state such as pinned map paths inside the editable policy file as if it were operator policy.
+
+### 6. Tests Required
+
+* config parsing tests must cover loading `/etc/walle/config.toml` semantics via the default-load helper.
+* config validation tests must cover:
+  * duplicate interfaces
+  * empty interface names
+  * invalid `payload_hex`
+  * payloads above `ICMP_RULE_PAYLOAD_CAPACITY`
+* policy compilation tests must assert `payload_hex` converts into the same canonical `IcmpRule` bytes as CLI-provided hex payloads.
+* daemon startup tests must assert multi-interface config produces one planned attachment per declared interface.
+* daemon/runtime tests must assert SSH detector policy remains global while interface ICMP modes can differ.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+* Keep a single top-level `icmp` block and a single optional `interface` field, then try to retrofit multi-interface behavior with ad-hoc CLI overrides.
+
+#### Correct
+
+* Model operator policy explicitly: global SSH detector and access policy, plus a list of declared interfaces that each own their interface-local packet filters.
+
+## Scenario: Multi-Interface Status And Runtime Stats Contract
+
+### 1. Scope / Trigger
+
+* Trigger: Any change to `walle status`, runtime snapshot structs, per-interface stats exposure, or aggregation across multiple declared interfaces.
+
+### 2. Signatures
+
+* `walle status`
+* `WalleDaemon::snapshot() -> StatusSnapshot`
+* `RuntimeController::snapshot() -> RuntimeSnapshot`
+* `LinuxMapRepository::snapshot() -> Result<RepositorySnapshot, RuntimeError>`
+
+### 3. Contracts
+
+* Status output must treat declared interfaces as first-class runtime units; it must not collapse multi-interface state into one synthetic primary-interface record.
+* Status must expose one per-interface snapshot containing at least:
+  * interface name
+  * runtime backend kind
+  * access mode
+  * interface-local ICMP mode
+  * allow / deny entry counts
+  * ICMP rule count
+  * packet-path stats counters
+* Status must also expose one aggregate summary across all selected interfaces.
+* Per-interface packet-path counters come from the interface-scoped `stats` map pinned under that interface's map directory.
+* When live pinned maps are not available, status may fall back to configured policy counts for static policy entries, but packet counters must remain explicit zeroes instead of fabricated values.
+* Global access policy remains host-level config, but because maps are per-interface, allow / deny entry counts in status are reported per runtime instance after sync.
+* SSH detector bans remain global policy decisions, but status must show the resulting deny entry count in each interface runtime because each runtime carries its own deny map copy in v1.
+
+### 4. Validation & Error Matrix
+
+* Valid config with two interfaces and no pinned maps -> status returns two per-interface snapshots with configured policy counts and zeroed live counters.
+* Valid config with two interfaces and pinned runtime maps -> status returns two per-interface snapshots populated from the pinned repositories.
+* Missing pinned map directory for one interface -> status keeps that interface snapshot in configured fallback mode instead of failing the entire command.
+* Existing pinned map path with unreadable or incompatible maps -> typed runtime error from the repository boundary.
+
+### 5. Good/Base/Bad Cases
+
+* Good:
+  * `eth0` and `eth1` appear separately in status and can show different ICMP modes and rule counts.
+  * aggregate packet counters equal the sum of the reported per-interface counters.
+  * zero live counters are shown explicitly when the daemon has not yet attached or synced maps.
+* Base:
+  * a single-interface config still produces one per-interface snapshot plus one aggregate summary.
+* Bad:
+  * reporting only the first configured interface and hiding the rest.
+  * fabricating packet counters from config instead of reading them from runtime stats maps.
+  * mixing global config summary with per-interface live stats without making the boundary explicit.
+
+### 6. Tests Required
+
+* daemon snapshot tests must assert multi-interface configs return one snapshot item per interface.
+* snapshot tests must assert per-interface ICMP mode differences are preserved.
+* runtime repository tests must assert stats counters are included in snapshots.
+* aggregate snapshot tests must assert packet counters are summed correctly across interfaces.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+* Keep `status` tied to `runtimes.first()` and treat the rest of the interfaces as an opaque count.
+
+#### Correct
+
+* Build status from all selected runtimes, preserve per-interface policy differences, and aggregate counters explicitly at the CLI boundary.
+
 ## Scenario: ICMP Runtime Config And Dataplane Contract
 
 ### 1. Scope / Trigger

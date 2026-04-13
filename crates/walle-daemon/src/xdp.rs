@@ -41,6 +41,32 @@ impl XdpAttachment {
     }
 }
 
+pub fn attach(
+    interface: &str,
+    object_path: Option<&Path>,
+    map_pin_path: Option<&Path>,
+) -> Result<XdpAttachment, XdpError> {
+    let object_path = object_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_object_path);
+    let map_pin_path = map_pin_path_for_interface(interface, map_pin_path);
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (interface, object_path, map_pin_path);
+        return Err(XdpError::UnsupportedHost);
+    }
+
+    if !object_path.exists() {
+        return Err(XdpError::MissingObject { path: object_path });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        attach_linux(interface, object_path, map_pin_path)
+    }
+}
+
 pub fn maybe_attach(
     interface: Option<&str>,
     object_path: Option<&Path>,
@@ -56,27 +82,7 @@ pub fn maybe_attach(
         return Ok(None);
     };
 
-    let object_path = object_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(default_object_path);
-    let map_pin_path = map_pin_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(default_map_pin_path);
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (interface, object_path, map_pin_path);
-        return Err(XdpError::UnsupportedHost);
-    }
-
-    if !object_path.exists() {
-        return Err(XdpError::MissingObject { path: object_path });
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        attach_linux(interface, object_path, map_pin_path).map(Some)
-    }
+    attach(interface, object_path, map_pin_path).map(Some)
 }
 
 #[must_use]
@@ -87,6 +93,14 @@ pub fn default_object_path() -> PathBuf {
 #[must_use]
 pub fn default_map_pin_path() -> PathBuf {
     PathBuf::from(DEFAULT_MAP_PIN_PATH)
+}
+
+#[must_use]
+pub fn map_pin_path_for_interface(interface: &str, map_pin_path: Option<&Path>) -> PathBuf {
+    let base = map_pin_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_map_pin_path);
+    base.join(interface)
 }
 
 fn workspace_root() -> PathBuf {
@@ -251,12 +265,20 @@ pub enum XdpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_object_path, maybe_attach};
+    use std::path::Path;
+
+    use super::{default_object_path, map_pin_path_for_interface, maybe_attach};
 
     #[test]
     fn default_object_path_points_to_workspace_target() {
         let path = default_object_path();
         assert!(path.ends_with("target/bpfel-unknown-none/release/walle-ebpf"));
+    }
+
+    #[test]
+    fn map_pin_path_is_scoped_per_interface() {
+        let path = map_pin_path_for_interface("eth0", Some(Path::new("/sys/fs/bpf/walle")));
+        assert_eq!(path, Path::new("/sys/fs/bpf/walle/eth0"));
     }
 
     #[test]

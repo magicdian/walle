@@ -34,6 +34,7 @@ impl Default for PacketAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum AccessMode {
     BlacklistOnly = 0,
@@ -68,6 +69,7 @@ impl Default for AccessMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum IcmpMode {
     Disabled = 0,
@@ -82,6 +84,7 @@ impl Default for IcmpMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum IcmpMatchType {
     RawBytesExact = 0,

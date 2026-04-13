@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use walle_common::{AccessMode, IcmpMode};
 use walle_daemon::logging::{format_unix_timestamp_secs, init_tracing};
 use walle_daemon::{DaemonOptions, WalleDaemon};
-use walle_policy::{IcmpAllowRule, WalleConfig};
+use walle_policy::{IcmpAllowRule, LogLevel, WalleConfig};
 
 #[derive(Debug, Parser)]
 #[command(name = "walle")]
@@ -187,9 +187,8 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
-    init_tracing();
-
     let cli = Cli::parse();
+    init_tracing(configured_log_level(&cli.command));
 
     match cli.command {
         Command::Run(args) => run_command(args),
@@ -204,9 +203,20 @@ fn run() -> Result<()> {
     }
 }
 
+fn configured_log_level(command: &Command) -> LogLevel {
+    match command {
+        Command::Reload => LogLevel::Info,
+        Command::Ban(_) | Command::Allow(_) | Command::Icmp(_) => LogLevel::Info,
+        _ => WalleConfig::load_default()
+            .map(|config| config.logging_policy().level)
+            .unwrap_or(LogLevel::Info),
+    }
+}
+
 fn run_command(args: RunArgs) -> Result<()> {
+    let config = load_default_config("walle run")?;
     let mut daemon = WalleDaemon::new(
-        WalleConfig::default(),
+        config,
         DaemonOptions {
             interface: args.interface,
             foreground: true,
@@ -229,42 +239,99 @@ fn reload_command() -> Result<()> {
 }
 
 fn show_status() -> Result<()> {
-    let daemon = WalleDaemon::new(WalleConfig::default(), DaemonOptions::default())?;
+    let mut daemon = WalleDaemon::new(
+        load_default_config("walle status")?,
+        DaemonOptions::default(),
+    )?;
+    daemon.connect_existing_runtime_backends()?;
     let snapshot = daemon.snapshot();
 
-    println!(
-        "interface: {}",
-        snapshot.interface.as_deref().unwrap_or("unset")
-    );
-    println!("access_mode: {:?}", snapshot.access_mode);
-    println!("icmp_mode: {:?}", snapshot.icmp_mode);
+    println!("interfaces: {}", snapshot.totals.interface_count);
     println!(
         "ssh_protection_enabled: {}",
         snapshot.ssh_protection_enabled
     );
     println!("ssh_failure_threshold: {}", snapshot.ssh_failure_threshold);
     println!("xdp_attached: {}", snapshot.xdp_attached);
-    println!("allow_v4_entries: {}", snapshot.allow_v4_entries);
-    println!("allow_v6_entries: {}", snapshot.allow_v6_entries);
-    println!("deny_v4_entries: {}", snapshot.deny_v4_entries);
-    println!("deny_v6_entries: {}", snapshot.deny_v6_entries);
-    println!("icmp_rule_entries: {}", snapshot.icmp_rule_entries);
+    println!(
+        "xdp_attached_interfaces: {}",
+        snapshot.xdp_attached_interfaces
+    );
+    println!(
+        "total_allow_v4_entries: {}",
+        snapshot.totals.allow_v4_entries
+    );
+    println!(
+        "total_allow_v6_entries: {}",
+        snapshot.totals.allow_v6_entries
+    );
+    println!("total_deny_v4_entries: {}", snapshot.totals.deny_v4_entries);
+    println!("total_deny_v6_entries: {}", snapshot.totals.deny_v6_entries);
+    println!(
+        "total_icmp_rule_entries: {}",
+        snapshot.totals.icmp_rule_entries
+    );
+    println!(
+        "total_packets_allowed: {}",
+        snapshot.totals.stats.packets_allowed
+    );
+    println!(
+        "total_packets_dropped: {}",
+        snapshot.totals.stats.packets_dropped
+    );
+    println!(
+        "total_allowlist_hits: {}",
+        snapshot.totals.stats.allowlist_hits
+    );
+    println!(
+        "total_denylist_hits: {}",
+        snapshot.totals.stats.denylist_hits
+    );
+    println!(
+        "total_icmp_rule_hits: {}",
+        snapshot.totals.stats.icmp_rule_hits
+    );
+    println!(
+        "total_parser_failures: {}",
+        snapshot.totals.stats.parser_failures
+    );
+
+    for interface in &snapshot.interfaces {
+        println!();
+        println!("[interface:{}]", interface.interface);
+        println!("backend: {}", interface.runtime_backend.as_str());
+        println!("xdp_attached: {}", interface.xdp_attached);
+        println!("access_mode: {:?}", interface.access_mode);
+        println!("icmp_mode: {:?}", interface.icmp_mode);
+        println!("allow_v4_entries: {}", interface.allow_v4_entries);
+        println!("allow_v6_entries: {}", interface.allow_v6_entries);
+        println!("deny_v4_entries: {}", interface.deny_v4_entries);
+        println!("deny_v6_entries: {}", interface.deny_v6_entries);
+        println!("icmp_rule_entries: {}", interface.icmp_rule_entries);
+        println!("packets_allowed: {}", interface.stats.packets_allowed);
+        println!("packets_dropped: {}", interface.stats.packets_dropped);
+        println!("allowlist_hits: {}", interface.stats.allowlist_hits);
+        println!("denylist_hits: {}", interface.stats.denylist_hits);
+        println!("icmp_rule_hits: {}", interface.stats.icmp_rule_hits);
+        println!("parser_failures: {}", interface.stats.parser_failures);
+    }
 
     Ok(())
 }
 
 fn verify_environment(args: VerifyEnvArgs) -> Result<()> {
-    let daemon = WalleDaemon::new(
-        WalleConfig::default(),
-        DaemonOptions {
-            interface: args.interface,
-            foreground: true,
-            xdp_object: None,
-            map_pin_path: None,
-            ssh_poll_interval_ms: 1_000,
-            ssh_follow_iterations: Some(0),
-        },
-    )?;
+    let mut options = DaemonOptions {
+        foreground: true,
+        xdp_object: None,
+        map_pin_path: None,
+        ssh_poll_interval_ms: 1_000,
+        ssh_follow_iterations: Some(0),
+        ..DaemonOptions::default()
+    };
+    if let Some(interface) = args.interface {
+        options.interface = Some(interface);
+    }
+    let daemon = WalleDaemon::new(load_default_config("walle verify-env")?, options)?;
     let report = daemon.verify_environment();
 
     println!("compatible: {}", report.is_compatible());
@@ -284,8 +351,8 @@ fn verify_environment(args: VerifyEnvArgs) -> Result<()> {
 fn handle_access_mode(command: AccessModeCommand) -> Result<()> {
     match command {
         AccessModeCommand::Get => {
-            let config = WalleConfig::default();
-            println!("current access mode: {:?}", config.access.mode);
+            let config = load_default_config("walle access-mode get")?;
+            println!("current access mode: {:?}", config.access_policy().mode);
         }
         AccessModeCommand::Set { mode } => {
             let mode: AccessMode = mode.into();
@@ -340,19 +407,22 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
             ToggleCommand::Disable => println!("planned SSH protection disable"),
         },
         SshCommand::PolicyShow => {
-            let config = WalleConfig::default();
+            let config = load_default_config("walle ssh policy-show")?;
             println!(
                 "ssh policy: enabled={}, threshold={}, window_secs={}, ban_duration_secs={}, source_mode={:?}, log_paths={:?}",
-                config.ssh.enabled,
-                config.ssh.failure_threshold,
-                config.ssh.window_secs,
-                config.ssh.ban_duration_secs,
-                config.ssh.log_source_mode,
-                config.ssh.log_file_paths
+                config.ssh_policy().enabled,
+                config.ssh_policy().failure_threshold,
+                config.ssh_policy().window_secs,
+                config.ssh_policy().ban_duration_secs,
+                config.ssh_policy().log_source_mode,
+                config.ssh_policy().log_file_paths
             );
         }
         SshCommand::Sources => {
-            let daemon = WalleDaemon::new(WalleConfig::default(), DaemonOptions::default())?;
+            let daemon = WalleDaemon::new(
+                load_default_config("walle ssh sources")?,
+                DaemonOptions::default(),
+            )?;
             for source in daemon.ssh_sources() {
                 match source {
                     walle_daemon::detector::SshResolvedLogSource::Journald => {
@@ -370,7 +440,10 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
             start_at_secs,
             step_secs,
         } => {
-            let mut daemon = WalleDaemon::new(WalleConfig::default(), DaemonOptions::default())?;
+            let mut daemon = WalleDaemon::new(
+                load_default_config("walle ssh inspect-line")?,
+                DaemonOptions::default(),
+            )?;
 
             if let Some(event) = daemon.inspect_ssh_log_line(&line) {
                 println!("parsed event: ip={}, reason={:?}", event.ip, event.reason);
@@ -399,7 +472,10 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
             }
         }
         SshCommand::PollSources { observed_at_secs } => {
-            let mut daemon = WalleDaemon::new(WalleConfig::default(), DaemonOptions::default())?;
+            let mut daemon = WalleDaemon::new(
+                load_default_config("walle ssh poll-sources")?,
+                DaemonOptions::default(),
+            )?;
             let summary = daemon.poll_ssh_sources(observed_at_secs)?;
             print_ingest_summary(&summary);
         }
@@ -408,13 +484,21 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
             start_at_secs,
             step_secs,
         } => {
-            let mut daemon = WalleDaemon::new(WalleConfig::default(), DaemonOptions::default())?;
+            let mut daemon = WalleDaemon::new(
+                load_default_config("walle ssh replay-file")?,
+                DaemonOptions::default(),
+            )?;
             let summary = daemon.replay_ssh_log_file(path, start_at_secs, step_secs)?;
             print_ingest_summary(&summary);
         }
     }
 
     Ok(())
+}
+
+fn load_default_config(command_name: &str) -> Result<WalleConfig> {
+    WalleConfig::load_default()
+        .with_context(|| format!("failed to load /etc/walle/config.toml for `{command_name}`"))
 }
 
 fn print_ingest_summary(summary: &walle_daemon::detector::SshIngestSummary) {
@@ -441,10 +525,9 @@ fn handle_icmp(command: IcmpCommand) -> Result<()> {
         },
         IcmpCommand::Allow { command } => match command {
             IcmpAllowCommand::Add { hex } => {
-                let payload = decode_hex_payload(&hex)?;
                 let compiled = IcmpAllowRule {
                     match_type: walle_common::IcmpMatchType::RawBytesExact,
-                    payload,
+                    payload_hex: hex.clone(),
                     enabled: true,
                 }
                 .compile()?;
@@ -462,25 +545,4 @@ fn handle_icmp(command: IcmpCommand) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn decode_hex_payload(input: &str) -> Result<Vec<u8>> {
-    let trimmed = input.trim();
-
-    if trimmed.len() % 2 != 0 {
-        anyhow::bail!("hex payload must contain an even number of characters");
-    }
-
-    let mut bytes = Vec::with_capacity(trimmed.len() / 2);
-    let mut index = 0;
-
-    while index < trimmed.len() {
-        let chunk = &trimmed[index..index + 2];
-        let byte = u8::from_str_radix(chunk, 16)
-            .with_context(|| format!("invalid hex byte '{chunk}' at offset {index}"))?;
-        bytes.push(byte);
-        index += 2;
-    }
-
-    Ok(bytes)
 }

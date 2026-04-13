@@ -16,8 +16,9 @@ use walle_common::{
     AccessMode, BanEntryV4, CONFIG_MAP_KEY, ICMP_RULE_MAP_CAPACITY, IcmpMode, IcmpRule,
     Ipv4AddrKey, Ipv6AddrKey, MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG,
     MAP_NAME_DENY_V4, MAP_NAME_DENY_V6, MAP_NAME_ICMP_RULES, MAP_NAME_STATS, RuntimeConfig,
+    STATS_MAP_KEY, StatsCounters,
 };
-use walle_policy::WalleConfig;
+use walle_policy::{InterfacePolicy, WalleConfig};
 
 use crate::logging::format_unix_timestamp_secs;
 
@@ -36,6 +37,22 @@ pub struct RuntimeController {
 pub struct BanExpirySummary {
     pub removed_v4: usize,
     pub removed_v6: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeBackendKind {
+    InMemory,
+    BpfMaps,
+}
+
+impl RuntimeBackendKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InMemory => "in_memory",
+            Self::BpfMaps => "bpf_maps",
+        }
+    }
 }
 
 impl BanExpirySummary {
@@ -76,14 +93,18 @@ impl RuntimeController {
         Ok(())
     }
 
-    pub fn sync_policy(&mut self, config: &WalleConfig) -> Result<(), RuntimeError> {
-        let runtime_config = config.runtime_config();
-        let icmp_rules = config.icmp.compile_rules()?;
+    pub fn sync_policy_for_interface(
+        &mut self,
+        config: &WalleConfig,
+        interface: &InterfacePolicy,
+    ) -> Result<(), RuntimeError> {
+        let runtime_config = config.runtime_config_for(interface);
+        let icmp_rules = interface.filters.icmp.compile_rules()?;
+        let access = config.access_policy();
 
         self.repository.write_config(runtime_config)?;
-        self.repository
-            .replace_allowlist(&config.access.allowlist)?;
-        self.repository.replace_denylist(&config.access.denylist)?;
+        self.repository.replace_allowlist(&access.allowlist)?;
+        self.repository.replace_denylist(&access.denylist)?;
         self.repository.replace_icmp_rules(&icmp_rules)?;
 
         let snapshot = self.repository.snapshot()?;
@@ -155,6 +176,7 @@ impl RuntimeController {
 
         RuntimeSnapshot {
             interface: self.interface.clone(),
+            backend: self.repository.kind(),
             access_mode: repo.config.access_mode,
             icmp_mode: repo.config.icmp_mode,
             allow_v4_entries: repo.allow_v4_entries,
@@ -162,6 +184,7 @@ impl RuntimeController {
             deny_v4_entries: repo.deny_v4_entries,
             deny_v6_entries: repo.deny_v6_entries,
             icmp_rule_entries: repo.icmp_rule_entries,
+            stats: repo.stats,
             map_names: vec![
                 MAP_NAME_CONFIG,
                 MAP_NAME_ALLOW_V4,
@@ -178,6 +201,7 @@ impl RuntimeController {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSnapshot {
     pub interface: Option<String>,
+    pub backend: RuntimeBackendKind,
     pub access_mode: AccessMode,
     pub icmp_mode: IcmpMode,
     pub allow_v4_entries: usize,
@@ -185,6 +209,7 @@ pub struct RuntimeSnapshot {
     pub deny_v4_entries: usize,
     pub deny_v6_entries: usize,
     pub icmp_rule_entries: usize,
+    pub stats: StatsCounters,
     pub map_names: Vec<&'static str>,
 }
 
@@ -196,6 +221,7 @@ pub struct RepositorySnapshot {
     pub deny_v4_entries: usize,
     pub deny_v6_entries: usize,
     pub icmp_rule_entries: usize,
+    pub stats: StatsCounters,
 }
 
 impl Default for RepositorySnapshot {
@@ -207,6 +233,7 @@ impl Default for RepositorySnapshot {
             deny_v4_entries: 0,
             deny_v6_entries: 0,
             icmp_rule_entries: 0,
+            stats: StatsCounters::default(),
         }
     }
 }
@@ -218,12 +245,16 @@ enum RuntimeRepository {
 }
 
 impl RuntimeRepository {
-    fn name(&self) -> &'static str {
+    fn kind(&self) -> RuntimeBackendKind {
         match self {
-            Self::InMemory(_) => "in_memory",
+            Self::InMemory(_) => RuntimeBackendKind::InMemory,
             #[cfg(target_os = "linux")]
-            Self::Linux(_) => "bpf_maps",
+            Self::Linux(_) => RuntimeBackendKind::BpfMaps,
         }
+    }
+
+    fn name(&self) -> &'static str {
+        self.kind().as_str()
     }
 
     fn write_config(&mut self, config: RuntimeConfig) -> Result<(), RuntimeError> {
@@ -386,6 +417,7 @@ impl InMemoryMapRepository {
             deny_v4_entries: self.deny_v4.len(),
             deny_v6_entries: self.deny_v6.len(),
             icmp_rule_entries: self.icmp_rules.len(),
+            stats: StatsCounters::default(),
         }
     }
 }
@@ -404,6 +436,7 @@ impl LinuxMapRepository {
         Self::open_deny_v4_map(map_pin_path)?;
         Self::open_deny_v6_map(map_pin_path)?;
         Self::open_icmp_rules_map(map_pin_path)?;
+        Self::open_stats_map(map_pin_path)?;
 
         Ok(Self {
             map_pin_path: map_pin_path.to_path_buf(),
@@ -557,6 +590,13 @@ impl LinuxMapRepository {
             Self::open_icmp_rules_map(&self.map_pin_path)?,
             MAP_NAME_ICMP_RULES,
         )?;
+        let stats = Self::open_stats_map(&self.map_pin_path)?
+            .get(&STATS_MAP_KEY, 0)
+            .map_err(|source| RuntimeError::MapOperation {
+                map: MAP_NAME_STATS,
+                operation: "get_stats",
+                source,
+            })?;
 
         Ok(RepositorySnapshot {
             config,
@@ -565,6 +605,7 @@ impl LinuxMapRepository {
             deny_v4_entries,
             deny_v6_entries,
             icmp_rule_entries,
+            stats,
         })
     }
 
@@ -658,6 +699,16 @@ impl LinuxMapRepository {
                 source,
             },
         )
+    }
+
+    fn open_stats_map(path: &Path) -> Result<Array<MapData, StatsCounters>, RuntimeError> {
+        Array::try_from(Map::Array(Self::open_map(path, MAP_NAME_STATS)?)).map_err(|source| {
+            RuntimeError::MapOpen {
+                map: MAP_NAME_STATS,
+                path: path.join(MAP_NAME_STATS),
+                source,
+            }
+        })
     }
 }
 
@@ -1034,17 +1085,27 @@ mod tests {
     fn runtime_sync_populates_repository_from_policy() {
         let mut controller = RuntimeController::new(Some("eth0".to_string()));
         let mut config = WalleConfig::default();
-        config.access.mode = AccessMode::WhitelistOnly;
-        config.access.allowlist = vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))];
-        config.access.denylist = vec![IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2))];
-        config.icmp.mode = IcmpMode::AllowRulesActive;
-        config.icmp.allow_rules = vec![IcmpAllowRule {
-            match_type: walle_common::IcmpMatchType::RawBytesExact,
-            payload: vec![0x61, 0x62],
-            enabled: true,
+        config.policy.access.mode = AccessMode::WhitelistOnly;
+        config.policy.access.allowlist = vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))];
+        config.policy.access.denylist = vec![IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2))];
+        config.interfaces = vec![walle_policy::InterfacePolicy {
+            name: "eth0".to_string(),
+            xdp_mode: walle_policy::XdpMode::Driver,
+            filters: walle_policy::InterfaceFilters {
+                icmp: walle_policy::IcmpPolicy {
+                    mode: IcmpMode::AllowRulesActive,
+                    allow_rules: vec![IcmpAllowRule {
+                        match_type: walle_common::IcmpMatchType::RawBytesExact,
+                        payload_hex: "6162".to_string(),
+                        enabled: true,
+                    }],
+                },
+            },
         }];
 
-        controller.sync_policy(&config).unwrap();
+        controller
+            .sync_policy_for_interface(&config, &config.interfaces[0])
+            .unwrap();
         let snapshot = controller.snapshot();
 
         assert_eq!(snapshot.access_mode, AccessMode::WhitelistOnly);

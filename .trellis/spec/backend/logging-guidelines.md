@@ -145,3 +145,37 @@ Current scaffold examples:
 * [`walle-daemon lib`](E:/coding/github_projects/walle/crates/walle-daemon/src/lib.rs): lifecycle logging
 * [`walle-daemon detector`](E:/coding/github_projects/walle/crates/walle-daemon/src/detector.rs): detector config logging
 * [`walle-daemon runtime`](E:/coding/github_projects/walle/crates/walle-daemon/src/runtime.rs): runtime sync logging
+
+## Scenario: Config-Driven Log Level Contract
+
+### 1. Scope / Trigger
+
+* Trigger: Any change to tracing initialization, operator-facing log verbosity, or service deployment logging behavior.
+
+### 2. Signatures
+
+* `WalleConfig::logging_policy() -> &LoggingPolicy`
+* `policy.logging.level`
+* `init_tracing(LogLevel)`
+* `walle run`
+
+### 3. Contracts
+
+* User-space log level must be sourced from `config.toml`, not require `RUST_LOG` to be set in the environment.
+* The operator-facing field lives in global policy config as `policy.logging.level`.
+* Supported values are the typed set `trace`, `debug`, `info`, `warn`, and `error`.
+* Default config behavior must produce `info` logs when no explicit level is configured.
+* The same config-driven level must apply to local CLI runs and service-managed runs such as systemd.
+
+### 4. Good/Base/Bad Cases
+
+* Good:
+  * operators set `policy.logging.level = "debug"` once and get the same verbosity in foreground runs and systemd service restarts.
+* Base:
+  * omitted logging config falls back to `info`.
+* Bad:
+  * keeping production log level only in service-unit environment variables while config owns the rest of the runtime contract.
+
+### 5. Tests Required
+
+* policy parsing tests must cover explicit logging level values and default fallback behavior.

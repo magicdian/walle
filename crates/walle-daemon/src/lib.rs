@@ -12,8 +12,8 @@ pub mod runtime;
 pub mod xdp;
 
 use tracing::{debug, info, warn};
-use walle_common::{AccessMode, IcmpMode};
-use walle_policy::WalleConfig;
+use walle_common::{AccessMode, IcmpMode, MAP_NAME_CONFIG, StatsCounters};
+use walle_policy::{InterfacePolicy, WalleConfig};
 
 use crate::detector::{
     SshBanDecision, SshDetectorService, SshFailureEvent, SshIngestSummary, SshLogIngestor,
@@ -22,11 +22,11 @@ use crate::detector::{
 pub use crate::error::{DaemonError, RuntimeLockError};
 use crate::logging::format_unix_timestamp_secs;
 use crate::runtime::{
-    EnvironmentReport, RuntimeController, RuntimeSnapshot, log_environment_report,
-    verify_environment,
+    EnvironmentReport, RuntimeBackendKind, RuntimeController, RuntimeSnapshot,
+    log_environment_report, verify_environment,
 };
 pub use crate::xdp::XdpError;
-use crate::xdp::{XdpAttachment, maybe_attach};
+use crate::xdp::{XdpAttachment, attach, map_pin_path_for_interface};
 
 const DEFAULT_SSH_POLL_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_RUNTIME_LOCK_PATH: &str = "/tmp/walle.lock";
@@ -56,26 +56,52 @@ impl Default for DaemonOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatusSnapshot {
-    pub interface: Option<String>,
-    pub access_mode: AccessMode,
-    pub icmp_mode: IcmpMode,
     pub ssh_protection_enabled: bool,
     pub ssh_failure_threshold: u32,
     pub xdp_attached: bool,
+    pub xdp_attached_interfaces: usize,
+    pub totals: AggregatedStatus,
+    pub interfaces: Vec<InterfaceStatusSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AggregatedStatus {
+    pub interface_count: usize,
     pub allow_v4_entries: usize,
     pub allow_v6_entries: usize,
     pub deny_v4_entries: usize,
     pub deny_v6_entries: usize,
     pub icmp_rule_entries: usize,
+    pub stats: StatsCounters,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterfaceStatusSnapshot {
+    pub interface: String,
+    pub runtime_backend: RuntimeBackendKind,
+    pub xdp_attached: bool,
+    pub access_mode: AccessMode,
+    pub icmp_mode: IcmpMode,
+    pub allow_v4_entries: usize,
+    pub allow_v6_entries: usize,
+    pub deny_v4_entries: usize,
+    pub deny_v6_entries: usize,
+    pub icmp_rule_entries: usize,
+    pub stats: StatsCounters,
 }
 
 pub struct WalleDaemon {
     detector: SshDetectorService,
     ssh_ingestor: SshLogIngestor,
-    runtime: RuntimeController,
-    xdp: Option<XdpAttachment>,
+    runtimes: Vec<InterfaceRuntime>,
     config: WalleConfig,
     options: DaemonOptions,
+}
+
+struct InterfaceRuntime {
+    interface: InterfacePolicy,
+    runtime: RuntimeController,
+    xdp: Option<XdpAttachment>,
 }
 
 #[derive(Debug)]
@@ -88,15 +114,22 @@ impl WalleDaemon {
     pub fn new(config: WalleConfig, options: DaemonOptions) -> Result<Self, DaemonError> {
         config.validate()?;
 
-        let runtime = RuntimeController::new(options.interface.clone());
-        let detector = SshDetectorService::new(config.ssh.clone());
+        let detector = SshDetectorService::new(config.ssh_policy().clone());
         let ssh_ingestor = detector.create_ingestor();
+        let selected_interfaces = select_interfaces(&config, options.interface.as_deref())?;
+        let runtimes = selected_interfaces
+            .into_iter()
+            .map(|interface| InterfaceRuntime {
+                runtime: RuntimeController::new(Some(interface.name.clone())),
+                interface,
+                xdp: None,
+            })
+            .collect();
 
         Ok(Self {
             detector,
             ssh_ingestor,
-            runtime,
-            xdp: None,
+            runtimes,
             config,
             options,
         })
@@ -117,7 +150,12 @@ impl WalleDaemon {
         info!(
             component = "daemon",
             event = "startup",
-            interface = self.options.interface.as_deref().unwrap_or("unset"),
+            interfaces = self
+                .runtimes
+                .iter()
+                .map(|runtime| runtime.interface.name.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
             foreground = self.options.foreground,
             "starting phase-1 daemon scaffold"
         );
@@ -125,36 +163,61 @@ impl WalleDaemon {
         let environment = self.verify_environment();
         log_environment_report(&environment);
 
-        self.xdp = maybe_attach(
-            self.options.interface.as_deref(),
-            self.options.xdp_object.as_deref(),
-            self.options.map_pin_path.as_deref(),
-        )?;
+        for runtime in &mut self.runtimes {
+            runtime.xdp = Some(attach(
+                runtime.interface.name.as_str(),
+                self.options.xdp_object.as_deref(),
+                self.options.map_pin_path.as_deref(),
+            )?);
 
-        if let Some(xdp) = &self.xdp {
-            self.runtime.connect_map_backend(xdp.map_pin_path())?;
+            if let Some(xdp) = &runtime.xdp {
+                runtime.runtime.connect_map_backend(xdp.map_pin_path())?;
 
-            info!(
-                component = "daemon",
-                event = "xdp_ready",
-                interface = xdp.interface(),
-                object_path = %xdp.object_path().display(),
-                map_pin_path = %xdp.map_pin_path().display(),
-                "XDP runtime attachment is active"
-            );
+                info!(
+                    component = "daemon",
+                    event = "xdp_ready",
+                    interface = xdp.interface(),
+                    object_path = %xdp.object_path().display(),
+                    map_pin_path = %xdp.map_pin_path().display(),
+                    "XDP runtime attachment is active"
+                );
+            }
         }
 
         self.detector.log_startup();
-        self.runtime.sync_policy(&self.config)?;
-        self.runtime.expire_bans(unix_timestamp_secs())?;
+        let observed_at_secs = unix_timestamp_secs();
+        for runtime in &mut self.runtimes {
+            runtime
+                .runtime
+                .sync_policy_for_interface(&self.config, &runtime.interface)?;
+            runtime.runtime.expire_bans(observed_at_secs)?;
+        }
 
         info!(
             component = "daemon",
             event = "startup_complete",
             compatible = environment.is_compatible(),
             detector = %self.detector.describe(),
+            interfaces = self.runtimes.len(),
             "daemon runtime is ready"
         );
+
+        Ok(())
+    }
+
+    pub fn connect_existing_runtime_backends(&mut self) -> Result<(), DaemonError> {
+        for runtime in &mut self.runtimes {
+            let map_pin_path = map_pin_path_for_interface(
+                runtime.interface.name.as_str(),
+                self.options.map_pin_path.as_deref(),
+            );
+
+            if !map_pin_path.join(MAP_NAME_CONFIG).exists() {
+                continue;
+            }
+
+            runtime.runtime.connect_map_backend(&map_pin_path)?;
+        }
 
         Ok(())
     }
@@ -188,7 +251,9 @@ impl WalleDaemon {
 
             iteration = iteration.saturating_add(1);
             let observed_at_secs = unix_timestamp_secs();
-            self.runtime.expire_bans(observed_at_secs)?;
+            for runtime in &mut self.runtimes {
+                runtime.runtime.expire_bans(observed_at_secs)?;
+            }
 
             match self.poll_ssh_sources(observed_at_secs) {
                 Ok(summary) => {
@@ -245,26 +310,79 @@ impl WalleDaemon {
 
     #[must_use]
     pub fn snapshot(&self) -> StatusSnapshot {
-        let runtime: RuntimeSnapshot = self.runtime.snapshot();
+        let (configured_allow_v4, configured_allow_v6) =
+            count_addresses_by_family(&self.config.access_policy().allowlist);
+        let (configured_deny_v4, configured_deny_v6) =
+            count_addresses_by_family(&self.config.access_policy().denylist);
+        let mut totals = AggregatedStatus {
+            interface_count: self.runtimes.len(),
+            allow_v4_entries: 0,
+            allow_v6_entries: 0,
+            deny_v4_entries: 0,
+            deny_v6_entries: 0,
+            icmp_rule_entries: 0,
+            stats: StatsCounters::default(),
+        };
+
+        let interfaces: Vec<InterfaceStatusSnapshot> = self
+            .runtimes
+            .iter()
+            .map(|runtime| {
+                let live: RuntimeSnapshot = runtime.runtime.snapshot();
+                let configured_icmp_rule_entries = runtime
+                    .interface
+                    .filters
+                    .icmp
+                    .compile_rules()
+                    .map(|rules| rules.len())
+                    .unwrap_or(0);
+
+                let snapshot = InterfaceStatusSnapshot {
+                    interface: runtime.interface.name.clone(),
+                    runtime_backend: live.backend,
+                    xdp_attached: runtime.xdp.is_some()
+                        || matches!(live.backend, RuntimeBackendKind::BpfMaps),
+                    access_mode: self.config.access_policy().mode,
+                    icmp_mode: runtime.interface.filters.icmp.mode,
+                    allow_v4_entries: live.allow_v4_entries.max(configured_allow_v4),
+                    allow_v6_entries: live.allow_v6_entries.max(configured_allow_v6),
+                    deny_v4_entries: live.deny_v4_entries.max(configured_deny_v4),
+                    deny_v6_entries: live.deny_v6_entries.max(configured_deny_v6),
+                    icmp_rule_entries: live.icmp_rule_entries.max(configured_icmp_rule_entries),
+                    stats: live.stats,
+                };
+
+                totals.allow_v4_entries += snapshot.allow_v4_entries;
+                totals.allow_v6_entries += snapshot.allow_v6_entries;
+                totals.deny_v4_entries += snapshot.deny_v4_entries;
+                totals.deny_v6_entries += snapshot.deny_v6_entries;
+                totals.icmp_rule_entries += snapshot.icmp_rule_entries;
+                add_stats(&mut totals.stats, snapshot.stats);
+
+                snapshot
+            })
+            .collect();
 
         StatusSnapshot {
-            interface: runtime.interface,
-            access_mode: runtime.access_mode,
-            icmp_mode: runtime.icmp_mode,
-            ssh_protection_enabled: self.config.ssh.enabled,
-            ssh_failure_threshold: self.config.ssh.failure_threshold,
-            xdp_attached: self.xdp.is_some(),
-            allow_v4_entries: runtime.allow_v4_entries,
-            allow_v6_entries: runtime.allow_v6_entries,
-            deny_v4_entries: runtime.deny_v4_entries,
-            deny_v6_entries: runtime.deny_v6_entries,
-            icmp_rule_entries: runtime.icmp_rule_entries,
+            ssh_protection_enabled: self.config.ssh_policy().enabled,
+            ssh_failure_threshold: self.config.ssh_policy().failure_threshold,
+            xdp_attached: interfaces.iter().any(|runtime| runtime.xdp_attached),
+            xdp_attached_interfaces: interfaces
+                .iter()
+                .filter(|runtime| runtime.xdp_attached)
+                .count(),
+            totals,
+            interfaces,
         }
     }
 
     #[must_use]
     pub fn verify_environment(&self) -> EnvironmentReport {
-        verify_environment(self.options.interface.as_deref())
+        verify_environment(
+            self.runtimes
+                .first()
+                .map(|runtime| runtime.interface.name.as_str()),
+        )
     }
 
     #[must_use]
@@ -285,7 +403,7 @@ impl WalleDaemon {
         let decision = self.detector.process_log_line(line, observed_at_secs);
 
         if let Some(ban) = decision.clone() {
-            self.runtime.apply_ssh_ban(ban)?;
+            self.apply_ssh_ban_to_all(ban)?;
         }
 
         Ok(decision)
@@ -299,7 +417,7 @@ impl WalleDaemon {
         let summary = self.detector.replay_lines(lines, observed_at_secs, 1);
 
         for decision in &summary.bans {
-            self.runtime.apply_ssh_ban(decision.clone())?;
+            self.apply_ssh_ban_to_all(decision.clone())?;
         }
 
         Ok(summary)
@@ -315,7 +433,7 @@ impl WalleDaemon {
         let summary = self.detector.replay_lines(lines, start_at_secs, step_secs);
 
         for decision in &summary.bans {
-            self.runtime.apply_ssh_ban(decision.clone())?;
+            self.apply_ssh_ban_to_all(decision.clone())?;
         }
 
         Ok(summary)
@@ -324,6 +442,55 @@ impl WalleDaemon {
     fn should_run_follow_loop(&self) -> bool {
         self.options.foreground && self.options.ssh_follow_iterations != Some(0)
     }
+
+    fn apply_ssh_ban_to_all(&mut self, decision: SshBanDecision) -> Result<(), DaemonError> {
+        for runtime in &mut self.runtimes {
+            runtime.runtime.apply_ssh_ban(decision.clone())?;
+        }
+
+        Ok(())
+    }
+}
+
+fn select_interfaces(
+    config: &WalleConfig,
+    requested_interface: Option<&str>,
+) -> Result<Vec<InterfacePolicy>, DaemonError> {
+    match requested_interface {
+        Some(name) => config
+            .interfaces()
+            .iter()
+            .find(|interface| interface.name == name)
+            .cloned()
+            .map(|interface| vec![interface])
+            .ok_or_else(|| DaemonError::InterfaceNotConfigured {
+                interface: name.to_string(),
+            }),
+        None => Ok(config.interfaces().to_vec()),
+    }
+}
+
+fn count_addresses_by_family(addresses: &[std::net::IpAddr]) -> (usize, usize) {
+    let mut v4 = 0;
+    let mut v6 = 0;
+
+    for address in addresses {
+        match address {
+            std::net::IpAddr::V4(_) => v4 += 1,
+            std::net::IpAddr::V6(_) => v6 += 1,
+        }
+    }
+
+    (v4, v6)
+}
+
+fn add_stats(total: &mut StatsCounters, value: StatsCounters) {
+    total.packets_allowed = total.packets_allowed.saturating_add(value.packets_allowed);
+    total.packets_dropped = total.packets_dropped.saturating_add(value.packets_dropped);
+    total.allowlist_hits = total.allowlist_hits.saturating_add(value.allowlist_hits);
+    total.denylist_hits = total.denylist_hits.saturating_add(value.denylist_hits);
+    total.icmp_rule_hits = total.icmp_rule_hits.saturating_add(value.icmp_rule_hits);
+    total.parser_failures = total.parser_failures.saturating_add(value.parser_failures);
 }
 
 impl RuntimeInstanceLock {
@@ -448,8 +615,14 @@ mod tests {
     use std::process;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{DEFAULT_SSH_POLL_INTERVAL_MS, DaemonOptions, RuntimeInstanceLock, WalleDaemon};
-    use walle_policy::WalleConfig;
+    use super::{
+        DEFAULT_SSH_POLL_INTERVAL_MS, DaemonOptions, RuntimeInstanceLock, WalleDaemon,
+        select_interfaces,
+    };
+    use walle_common::{IcmpMatchType, IcmpMode};
+    use walle_policy::{
+        IcmpAllowRule, IcmpPolicy, InterfaceFilters, InterfacePolicy, WalleConfig, XdpMode,
+    };
 
     #[test]
     fn default_daemon_options_use_expected_ssh_poll_interval() {
@@ -499,6 +672,105 @@ mod tests {
     }
 
     #[test]
+    fn daemon_selects_all_declared_interfaces_by_default() {
+        let config = config_with_interfaces();
+        let daemon = WalleDaemon::new(config, DaemonOptions::default())
+            .expect("declared interfaces should be accepted");
+
+        let snapshot = daemon.snapshot();
+        assert_eq!(snapshot.interfaces.len(), 2);
+        assert_eq!(snapshot.interfaces[0].interface, "eth0");
+        assert_eq!(snapshot.interfaces[1].interface, "eth1");
+        assert_eq!(snapshot.interfaces[0].icmp_mode, IcmpMode::AllowRulesActive);
+        assert_eq!(snapshot.interfaces[1].icmp_mode, IcmpMode::Disabled);
+        assert_eq!(snapshot.interfaces[0].icmp_rule_entries, 1);
+        assert_eq!(snapshot.interfaces[1].icmp_rule_entries, 0);
+        assert_eq!(snapshot.totals.interface_count, 2);
+        assert_eq!(snapshot.totals.icmp_rule_entries, 1);
+    }
+
+    #[test]
+    fn snapshot_aggregates_stats_across_interfaces() {
+        let mut daemon = WalleDaemon::new(config_with_interfaces(), DaemonOptions::default())
+            .expect("declared interfaces should be accepted");
+
+        daemon
+            .process_ssh_log_line(
+                "Apr 13 12:00:00 host sshd[123]: Failed password for root from 198.51.100.42 port 22 ssh2",
+                1,
+            )
+            .expect("processing the first failed line should succeed");
+        daemon
+            .process_ssh_log_line(
+                "Apr 13 12:00:01 host sshd[124]: Failed password for root from 198.51.100.42 port 22 ssh2",
+                2,
+            )
+            .expect("processing the second failed line should succeed");
+        daemon
+            .process_ssh_log_line(
+                "Apr 13 12:00:02 host sshd[125]: Failed password for root from 198.51.100.42 port 22 ssh2",
+                3,
+            )
+            .expect("processing the third failed line should succeed");
+        daemon
+            .process_ssh_log_line(
+                "Apr 13 12:00:03 host sshd[126]: Failed password for root from 198.51.100.42 port 22 ssh2",
+                4,
+            )
+            .expect("processing the fourth failed line should succeed");
+        daemon
+            .process_ssh_log_line(
+                "Apr 13 12:00:04 host sshd[127]: Failed password for root from 198.51.100.42 port 22 ssh2",
+                5,
+            )
+            .expect("processing the fifth failed line should succeed");
+
+        let snapshot = daemon.snapshot();
+        assert_eq!(snapshot.totals.deny_v4_entries, 2);
+        assert!(
+            snapshot
+                .interfaces
+                .iter()
+                .all(|item| item.deny_v4_entries >= 1)
+        );
+        assert_eq!(snapshot.totals.stats.packets_allowed, 0);
+        assert_eq!(snapshot.totals.stats.parser_failures, 0);
+    }
+
+    #[test]
+    fn daemon_rejects_unknown_interface_override() {
+        let result = WalleDaemon::new(
+            config_with_interfaces(),
+            DaemonOptions {
+                interface: Some("eth9".to_string()),
+                ..DaemonOptions::default()
+            },
+        );
+
+        match result {
+            Ok(_) => panic!("unknown interface override should be rejected"),
+            Err(error) => {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("requested interface 'eth9' is not declared")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn select_interfaces_filters_to_requested_interface() {
+        let config = config_with_interfaces();
+        let selected = select_interfaces(&config, Some("eth1"))
+            .expect("configured interface should be selectable");
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "eth1");
+        assert_eq!(selected[0].filters.icmp.mode, IcmpMode::Disabled);
+    }
+
+    #[test]
     fn runtime_lock_rejects_second_live_instance() {
         let path = unique_test_lock_path("active");
         let _guard = RuntimeInstanceLock::acquire(&path).expect("first lock should be acquired");
@@ -533,5 +805,33 @@ mod tests {
             .expect("system clock should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("walle-{name}-{}-{nanos}.lock", process::id()))
+    }
+
+    fn config_with_interfaces() -> WalleConfig {
+        let mut config = WalleConfig::default();
+        config.interfaces = vec![
+            InterfacePolicy {
+                name: "eth0".to_string(),
+                xdp_mode: XdpMode::Driver,
+                filters: InterfaceFilters {
+                    icmp: IcmpPolicy {
+                        mode: IcmpMode::AllowRulesActive,
+                        allow_rules: vec![IcmpAllowRule {
+                            match_type: IcmpMatchType::RawBytesExact,
+                            payload_hex: "09070108".to_string(),
+                            enabled: true,
+                        }],
+                    },
+                },
+            },
+            InterfacePolicy {
+                name: "eth1".to_string(),
+                xdp_mode: XdpMode::Driver,
+                filters: InterfaceFilters {
+                    icmp: IcmpPolicy::default(),
+                },
+            },
+        ];
+        config
     }
 }

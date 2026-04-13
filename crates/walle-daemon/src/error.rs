@@ -20,6 +20,8 @@ pub enum DaemonError {
     RuntimeLock(#[from] RuntimeLockError),
     #[error("XDP operation failed: {0}")]
     Xdp(#[from] XdpError),
+    #[error("requested interface '{interface}' is not declared in the loaded config")]
+    InterfaceNotConfigured { interface: String },
 }
 
 #[derive(Debug, Error)]

@@ -4,6 +4,7 @@ use time::{OffsetDateTime, UtcOffset};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
+use walle_policy::LogLevel;
 
 const AUDIT_TIME_OFFSET_HOURS: i8 = 8;
 const AUDIT_TIME_OFFSET_LABEL: &str = "UTC+8";
@@ -21,10 +22,10 @@ impl FormatTime for AuditLogTimer {
     }
 }
 
-pub fn init_tracing() {
+pub fn init_tracing(level: LogLevel) {
     tracing_subscriber::fmt()
         .with_timer(AuditLogTimer)
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(EnvFilter::new(level.as_filter_directive()))
         .init();
 }
 
