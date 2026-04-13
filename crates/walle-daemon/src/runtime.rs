@@ -15,8 +15,9 @@ use tracing::{debug, info};
 use walle_common::{
     AccessMode, BanEntryV4, CONFIG_MAP_KEY, ICMP_RULE_MAP_CAPACITY, IcmpMode, IcmpRule,
     Ipv4AddrKey, Ipv6AddrKey, MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG,
-    MAP_NAME_DENY_V4, MAP_NAME_DENY_V6, MAP_NAME_ICMP_RULES, MAP_NAME_STATS, RuntimeConfig,
-    STATS_MAP_KEY, StatsCounters,
+    MAP_NAME_CONTAIN_V4, MAP_NAME_CONTAIN_V6, MAP_NAME_DENY_V4, MAP_NAME_DENY_V6,
+    MAP_NAME_ICMP_RULES, MAP_NAME_STATS, RuntimeConfig, STATS_MAP_KEY, StatsCounters,
+    SshContainEntry, SshContainTrigger,
 };
 use walle_policy::{InterfacePolicy, WalleConfig};
 
@@ -109,7 +110,20 @@ impl RuntimeController {
         config: &WalleConfig,
         interface: &InterfacePolicy,
     ) -> Result<(), RuntimeError> {
-        let runtime_config = config.runtime_config_for(interface);
+        self.sync_policy_for_interface_with_ssh_jail_port(
+            config,
+            interface,
+            config.ssh_policy().gp.sshjail.listen_port,
+        )
+    }
+
+    pub fn sync_policy_for_interface_with_ssh_jail_port(
+        &mut self,
+        config: &WalleConfig,
+        interface: &InterfacePolicy,
+        ssh_jail_port: u16,
+    ) -> Result<(), RuntimeError> {
+        let runtime_config = config.runtime_config_for_ssh_jail_port(interface, ssh_jail_port);
         let icmp_rules = interface.filters.icmp.compile_rules()?;
         let access = config.access_policy();
 
@@ -189,6 +203,34 @@ impl RuntimeController {
         Ok(())
     }
 
+    pub fn apply_ssh_contain(
+        &mut self,
+        ip: IpAddr,
+        observed_at_secs: u64,
+        expires_at_secs: u64,
+        trigger: SshContainTrigger,
+    ) -> Result<(), RuntimeError> {
+        let entry = ssh_contain_entry(observed_at_secs, expires_at_secs, trigger);
+
+        match ip {
+            IpAddr::V4(ip) => self.repository.upsert_contain_v4(ip, entry)?,
+            IpAddr::V6(ip) => self.repository.upsert_contain_v6(ip, entry)?,
+        }
+
+        debug!(
+            component = "runtime",
+            event = "ssh_contain_applied",
+            ip = %ip,
+            observed_at = %format_unix_timestamp_secs(observed_at_secs),
+            expires_at = %format_unix_timestamp_secs(expires_at_secs),
+            trigger = ?trigger,
+            backend = self.repository.name(),
+            "applied SSH containment entry to runtime repository"
+        );
+
+        Ok(())
+    }
+
     pub fn remove_ban(&mut self, ip: IpAddr) -> Result<bool, RuntimeError> {
         let removed = match ip {
             IpAddr::V4(ip) => self.repository.remove_deny_v4(ip)?,
@@ -216,6 +258,13 @@ impl RuntimeController {
         Ok(removed)
     }
 
+    pub fn remove_ssh_contain(&mut self, ip: IpAddr) -> Result<bool, RuntimeError> {
+        match ip {
+            IpAddr::V4(ip) => self.repository.remove_contain_v4(ip),
+            IpAddr::V6(ip) => self.repository.remove_contain_v6(ip),
+        }
+    }
+
     pub fn expire_bans(&mut self, observed_at_secs: u64) -> Result<BanExpirySummary, RuntimeError> {
         let summary = self.repository.expire_bans(observed_at_secs)?;
 
@@ -228,6 +277,27 @@ impl RuntimeController {
                 removed_v6 = summary.removed_v6,
                 backend = self.repository.name(),
                 "expired runtime bans were removed"
+            );
+        }
+
+        Ok(summary)
+    }
+
+    pub fn expire_ssh_contain(
+        &mut self,
+        observed_at_secs: u64,
+    ) -> Result<BanExpirySummary, RuntimeError> {
+        let summary = self.repository.expire_contains(observed_at_secs)?;
+
+        if summary.total_removed() > 0 {
+            info!(
+                component = "runtime",
+                event = "ssh_contain_expiry_cleanup",
+                observed_at = %format_unix_timestamp_secs(observed_at_secs),
+                removed_v4 = summary.removed_v4,
+                removed_v6 = summary.removed_v6,
+                backend = self.repository.name(),
+                "expired SSH containment entries were removed"
             );
         }
 
@@ -251,6 +321,8 @@ impl RuntimeController {
             allow_v6_entries: repo.allow_v6_entries,
             deny_v4_entries: repo.deny_v4_entries,
             deny_v6_entries: repo.deny_v6_entries,
+            contain_v4_entries: repo.contain_v4_entries,
+            contain_v6_entries: repo.contain_v6_entries,
             icmp_rule_entries: repo.icmp_rule_entries,
             stats: repo.stats,
             map_names: vec![
@@ -259,6 +331,8 @@ impl RuntimeController {
                 MAP_NAME_ALLOW_V6,
                 MAP_NAME_DENY_V4,
                 MAP_NAME_DENY_V6,
+                MAP_NAME_CONTAIN_V4,
+                MAP_NAME_CONTAIN_V6,
                 MAP_NAME_ICMP_RULES,
                 MAP_NAME_STATS,
             ],
@@ -276,6 +350,8 @@ pub struct RuntimeSnapshot {
     pub allow_v6_entries: usize,
     pub deny_v4_entries: usize,
     pub deny_v6_entries: usize,
+    pub contain_v4_entries: usize,
+    pub contain_v6_entries: usize,
     pub icmp_rule_entries: usize,
     pub stats: StatsCounters,
     pub map_names: Vec<&'static str>,
@@ -288,6 +364,8 @@ pub struct RepositorySnapshot {
     pub allow_v6_entries: usize,
     pub deny_v4_entries: usize,
     pub deny_v6_entries: usize,
+    pub contain_v4_entries: usize,
+    pub contain_v6_entries: usize,
     pub icmp_rule_entries: usize,
     pub stats: StatsCounters,
 }
@@ -300,6 +378,8 @@ impl Default for RepositorySnapshot {
             allow_v6_entries: 0,
             deny_v4_entries: 0,
             deny_v6_entries: 0,
+            contain_v4_entries: 0,
+            contain_v6_entries: 0,
             icmp_rule_entries: 0,
             stats: StatsCounters::default(),
         }
@@ -391,6 +471,36 @@ impl RuntimeRepository {
         }
     }
 
+    fn upsert_contain_v4(
+        &mut self,
+        ip: Ipv4Addr,
+        entry: SshContainEntry,
+    ) -> Result<(), RuntimeError> {
+        match self {
+            Self::InMemory(repository) => {
+                repository.upsert_contain_v4(ip, entry);
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            Self::Linux(repository) => repository.upsert_contain_v4(ip, entry),
+        }
+    }
+
+    fn upsert_contain_v6(
+        &mut self,
+        ip: Ipv6Addr,
+        entry: SshContainEntry,
+    ) -> Result<(), RuntimeError> {
+        match self {
+            Self::InMemory(repository) => {
+                repository.upsert_contain_v6(ip, entry);
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            Self::Linux(repository) => repository.upsert_contain_v6(ip, entry),
+        }
+    }
+
     fn snapshot(&self) -> Result<RepositorySnapshot, RuntimeError> {
         match self {
             Self::InMemory(repository) => Ok(repository.snapshot()),
@@ -415,11 +525,35 @@ impl RuntimeRepository {
         }
     }
 
+    fn remove_contain_v4(&mut self, ip: Ipv4Addr) -> Result<bool, RuntimeError> {
+        match self {
+            Self::InMemory(repository) => Ok(repository.remove_contain_v4(ip)),
+            #[cfg(target_os = "linux")]
+            Self::Linux(repository) => repository.remove_contain_v4(ip),
+        }
+    }
+
+    fn remove_contain_v6(&mut self, ip: Ipv6Addr) -> Result<bool, RuntimeError> {
+        match self {
+            Self::InMemory(repository) => Ok(repository.remove_contain_v6(ip)),
+            #[cfg(target_os = "linux")]
+            Self::Linux(repository) => repository.remove_contain_v6(ip),
+        }
+    }
+
     fn expire_bans(&mut self, observed_at_secs: u64) -> Result<BanExpirySummary, RuntimeError> {
         match self {
             Self::InMemory(repository) => Ok(repository.expire_bans(observed_at_secs)),
             #[cfg(target_os = "linux")]
             Self::Linux(repository) => repository.expire_bans(observed_at_secs),
+        }
+    }
+
+    fn expire_contains(&mut self, observed_at_secs: u64) -> Result<BanExpirySummary, RuntimeError> {
+        match self {
+            Self::InMemory(repository) => Ok(repository.expire_contains(observed_at_secs)),
+            #[cfg(target_os = "linux")]
+            Self::Linux(repository) => repository.expire_contains(observed_at_secs),
         }
     }
 
@@ -439,6 +573,8 @@ pub struct InMemoryMapRepository {
     allow_v6: BTreeSet<Ipv6Addr>,
     deny_v4: HashMap<Ipv4Addr, BanEntryV4>,
     deny_v6: HashMap<Ipv6Addr, BanEntryV4>,
+    contain_v4: HashMap<Ipv4Addr, SshContainEntry>,
+    contain_v6: HashMap<Ipv6Addr, SshContainEntry>,
     icmp_rules: HashSet<IcmpRule>,
 }
 
@@ -487,12 +623,28 @@ impl InMemoryMapRepository {
         self.deny_v6.insert(ip, entry);
     }
 
+    pub fn upsert_contain_v4(&mut self, ip: Ipv4Addr, entry: SshContainEntry) {
+        self.contain_v4.insert(ip, entry);
+    }
+
+    pub fn upsert_contain_v6(&mut self, ip: Ipv6Addr, entry: SshContainEntry) {
+        self.contain_v6.insert(ip, entry);
+    }
+
     pub fn remove_deny_v4(&mut self, ip: Ipv4Addr) -> bool {
         self.deny_v4.remove(&ip).is_some()
     }
 
     pub fn remove_deny_v6(&mut self, ip: Ipv6Addr) -> bool {
         self.deny_v6.remove(&ip).is_some()
+    }
+
+    pub fn remove_contain_v4(&mut self, ip: Ipv4Addr) -> bool {
+        self.contain_v4.remove(&ip).is_some()
+    }
+
+    pub fn remove_contain_v6(&mut self, ip: Ipv6Addr) -> bool {
+        self.contain_v6.remove(&ip).is_some()
     }
 
     pub fn replace_icmp_rules(&mut self, rules: &[IcmpRule]) {
@@ -509,6 +661,14 @@ impl InMemoryMapRepository {
     }
 
     #[must_use]
+    pub fn expire_contains(&mut self, observed_at_secs: u64) -> BanExpirySummary {
+        BanExpirySummary {
+            removed_v4: expire_contain_map(&mut self.contain_v4, observed_at_secs),
+            removed_v6: expire_contain_map(&mut self.contain_v6, observed_at_secs),
+        }
+    }
+
+    #[must_use]
     pub fn snapshot(&self) -> RepositorySnapshot {
         RepositorySnapshot {
             config: self.config,
@@ -516,6 +676,8 @@ impl InMemoryMapRepository {
             allow_v6_entries: self.allow_v6.len(),
             deny_v4_entries: self.deny_v4.len(),
             deny_v6_entries: self.deny_v6.len(),
+            contain_v4_entries: self.contain_v4.len(),
+            contain_v6_entries: self.contain_v6.len(),
             icmp_rule_entries: self.icmp_rules.len(),
             stats: StatsCounters::default(),
         }
@@ -553,6 +715,8 @@ impl LinuxMapRepository {
         Self::open_allow_v6_map(map_pin_path)?;
         Self::open_deny_v4_map(map_pin_path)?;
         Self::open_deny_v6_map(map_pin_path)?;
+        Self::open_contain_v4_map(map_pin_path)?;
+        Self::open_contain_v6_map(map_pin_path)?;
         Self::open_icmp_rules_map(map_pin_path)?;
         Self::open_stats_map(map_pin_path)?;
 
@@ -680,19 +844,67 @@ impl LinuxMapRepository {
             })
     }
 
+    fn upsert_contain_v4(
+        &mut self,
+        ip: Ipv4Addr,
+        entry: SshContainEntry,
+    ) -> Result<(), RuntimeError> {
+        let mut map = Self::open_contain_v4_map(&self.map_pin_path)?;
+        map.insert(Ipv4AddrKey::new(ip.octets()), entry, 0)
+            .map_err(|source| RuntimeError::MapOperation {
+                map: MAP_NAME_CONTAIN_V4,
+                operation: "upsert_contain_v4",
+                source,
+            })
+    }
+
+    fn upsert_contain_v6(
+        &mut self,
+        ip: Ipv6Addr,
+        entry: SshContainEntry,
+    ) -> Result<(), RuntimeError> {
+        let mut map = Self::open_contain_v6_map(&self.map_pin_path)?;
+        map.insert(Ipv6AddrKey::new(ip.octets()), entry, 0)
+            .map_err(|source| RuntimeError::MapOperation {
+                map: MAP_NAME_CONTAIN_V6,
+                operation: "upsert_contain_v6",
+                source,
+            })
+    }
+
     fn remove_deny_v4(&mut self, ip: Ipv4Addr) -> Result<bool, RuntimeError> {
-        remove_pinned_ban(
+        remove_pinned_entry(
             Self::open_deny_v4_map(&self.map_pin_path)?,
             MAP_NAME_DENY_V4,
             Ipv4AddrKey::new(ip.octets()),
+            "remove_deny_entry",
         )
     }
 
     fn remove_deny_v6(&mut self, ip: Ipv6Addr) -> Result<bool, RuntimeError> {
-        remove_pinned_ban(
+        remove_pinned_entry(
             Self::open_deny_v6_map(&self.map_pin_path)?,
             MAP_NAME_DENY_V6,
             Ipv6AddrKey::new(ip.octets()),
+            "remove_deny_entry",
+        )
+    }
+
+    fn remove_contain_v4(&mut self, ip: Ipv4Addr) -> Result<bool, RuntimeError> {
+        remove_pinned_entry(
+            Self::open_contain_v4_map(&self.map_pin_path)?,
+            MAP_NAME_CONTAIN_V4,
+            Ipv4AddrKey::new(ip.octets()),
+            "remove_contain_entry",
+        )
+    }
+
+    fn remove_contain_v6(&mut self, ip: Ipv6Addr) -> Result<bool, RuntimeError> {
+        remove_pinned_entry(
+            Self::open_contain_v6_map(&self.map_pin_path)?,
+            MAP_NAME_CONTAIN_V6,
+            Ipv6AddrKey::new(ip.octets()),
+            "remove_contain_entry",
         )
     }
 
@@ -720,6 +932,14 @@ impl LinuxMapRepository {
             Self::open_deny_v6_map(&self.map_pin_path)?,
             MAP_NAME_DENY_V6,
         )?;
+        let contain_v4_entries = count_keys(
+            Self::open_contain_v4_map(&self.map_pin_path)?,
+            MAP_NAME_CONTAIN_V4,
+        )?;
+        let contain_v6_entries = count_keys(
+            Self::open_contain_v6_map(&self.map_pin_path)?,
+            MAP_NAME_CONTAIN_V6,
+        )?;
         let icmp_rule_entries = count_keys(
             Self::open_icmp_rules_map(&self.map_pin_path)?,
             MAP_NAME_ICMP_RULES,
@@ -738,6 +958,8 @@ impl LinuxMapRepository {
             allow_v6_entries,
             deny_v4_entries,
             deny_v6_entries,
+            contain_v4_entries,
+            contain_v6_entries,
             icmp_rule_entries,
             stats,
         })
@@ -753,6 +975,24 @@ impl LinuxMapRepository {
             removed_v6: expire_pinned_ban_map(
                 Self::open_deny_v6_map(&self.map_pin_path)?,
                 MAP_NAME_DENY_V6,
+                observed_at_secs,
+            )?,
+        })
+    }
+
+    fn expire_contains(
+        &mut self,
+        observed_at_secs: u64,
+    ) -> Result<BanExpirySummary, RuntimeError> {
+        Ok(BanExpirySummary {
+            removed_v4: expire_pinned_contain_map(
+                Self::open_contain_v4_map(&self.map_pin_path)?,
+                MAP_NAME_CONTAIN_V4,
+                observed_at_secs,
+            )?,
+            removed_v6: expire_pinned_contain_map(
+                Self::open_contain_v6_map(&self.map_pin_path)?,
+                MAP_NAME_CONTAIN_V6,
                 observed_at_secs,
             )?,
         })
@@ -850,6 +1090,30 @@ impl LinuxMapRepository {
         )
     }
 
+    fn open_contain_v4_map(
+        path: &Path,
+    ) -> Result<BpfHashMap<MapData, Ipv4AddrKey, SshContainEntry>, RuntimeError> {
+        BpfHashMap::try_from(Map::HashMap(Self::open_map(path, MAP_NAME_CONTAIN_V4)?)).map_err(
+            |source| RuntimeError::MapOpen {
+                map: MAP_NAME_CONTAIN_V4,
+                path: path.join(MAP_NAME_CONTAIN_V4),
+                source,
+            },
+        )
+    }
+
+    fn open_contain_v6_map(
+        path: &Path,
+    ) -> Result<BpfHashMap<MapData, Ipv6AddrKey, SshContainEntry>, RuntimeError> {
+        BpfHashMap::try_from(Map::HashMap(Self::open_map(path, MAP_NAME_CONTAIN_V6)?)).map_err(
+            |source| RuntimeError::MapOpen {
+                map: MAP_NAME_CONTAIN_V6,
+                path: path.join(MAP_NAME_CONTAIN_V6),
+                source,
+            },
+        )
+    }
+
     fn open_stats_map(path: &Path) -> Result<Array<MapData, StatsCounters>, RuntimeError> {
         Array::try_from(Map::Array(Self::open_map(path, MAP_NAME_STATS)?)).map_err(|source| {
             RuntimeError::MapOpen {
@@ -929,11 +1193,34 @@ where
     removed
 }
 
+fn expire_contain_map<K>(map: &mut HashMap<K, SshContainEntry>, observed_at_secs: u64) -> usize
+where
+    K: Copy + Eq + Hash,
+{
+    let expired_keys = map
+        .iter()
+        .filter_map(|(key, entry)| is_expired_contain(entry, observed_at_secs).then_some(*key))
+        .collect::<Vec<_>>();
+
+    let removed = expired_keys.len();
+
+    for key in expired_keys {
+        map.remove(&key);
+    }
+
+    removed
+}
+
 fn sort_ban_records(records: &mut [BanRecord]) {
     records.sort_by(|left, right| left.ip.to_string().cmp(&right.ip.to_string()));
 }
 
 fn is_expired_ban(entry: &BanEntryV4, observed_at_secs: u64) -> bool {
+    let observed_at_ns = observed_at_secs.saturating_mul(1_000_000_000);
+    entry.expires_at_ns != 0 && entry.expires_at_ns <= observed_at_ns
+}
+
+fn is_expired_contain(entry: &SshContainEntry, observed_at_secs: u64) -> bool {
     let observed_at_ns = observed_at_secs.saturating_mul(1_000_000_000);
     entry.expires_at_ns != 0 && entry.expires_at_ns <= observed_at_ns
 }
@@ -949,6 +1236,18 @@ fn manual_ban_entry(created_at_secs: u64, duration_secs: Option<u64>) -> BanEntr
         expires_at_ns,
         ..BanEntryV4::manual_indefinite(created_at_ns)
     }
+}
+
+fn ssh_contain_entry(
+    created_at_secs: u64,
+    expires_at_secs: u64,
+    trigger: SshContainTrigger,
+) -> SshContainEntry {
+    SshContainEntry::new(
+        created_at_secs.saturating_mul(1_000_000_000),
+        expires_at_secs.saturating_mul(1_000_000_000),
+        trigger,
+    )
 }
 
 fn ban_entry_expires_at_secs(entry: BanEntryV4) -> Option<u64> {
@@ -1005,13 +1304,58 @@ where
 }
 
 #[cfg(target_os = "linux")]
-fn remove_pinned_ban<K>(
-    mut map: BpfHashMap<MapData, K, BanEntryV4>,
+fn expire_pinned_contain_map<K>(
+    mut map: BpfHashMap<MapData, K, SshContainEntry>,
+    name: &'static str,
+    observed_at_secs: u64,
+) -> Result<usize, RuntimeError>
+where
+    K: Copy + Pod,
+{
+    let keys = map
+        .keys()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| RuntimeError::MapOperation {
+            map: name,
+            operation: "collect_expiry_keys",
+            source,
+        })?;
+
+    let mut removed = 0;
+
+    for key in keys {
+        let entry = map
+            .get(&key, 0)
+            .map_err(|source| RuntimeError::MapOperation {
+                map: name,
+                operation: "get_expiry_entry",
+                source,
+            })?;
+
+        if is_expired_contain(&entry, observed_at_secs) {
+            map.remove(&key)
+                .map_err(|source| RuntimeError::MapOperation {
+                    map: name,
+                    operation: "remove_expired_contain",
+                    source,
+                })?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+#[cfg(target_os = "linux")]
+fn remove_pinned_entry<K, V>(
+    mut map: BpfHashMap<MapData, K, V>,
     name: &'static str,
     key: K,
+    operation: &'static str,
 ) -> Result<bool, RuntimeError>
 where
     K: Copy + Pod + PartialEq,
+    V: Pod,
 {
     let keys = map
         .keys()
@@ -1029,7 +1373,7 @@ where
     map.remove(&key)
         .map_err(|source| RuntimeError::MapOperation {
             map: name,
-            operation: "remove_deny_entry",
+            operation,
             source,
         })?;
 

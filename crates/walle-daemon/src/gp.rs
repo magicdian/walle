@@ -40,6 +40,7 @@ pub enum GpExecutionStatus {
     Disabled,
     TriggerFiltered,
     Observed,
+    Contained,
     FailedOpen,
 }
 
@@ -50,6 +51,7 @@ impl GpExecutionStatus {
             Self::Disabled => "disabled",
             Self::TriggerFiltered => "trigger_filtered",
             Self::Observed => "observed",
+            Self::Contained => "contained",
             Self::FailedOpen => "failed_open",
         }
     }
@@ -58,6 +60,7 @@ impl GpExecutionStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GpExecutionError {
     StrategyUnavailable { strategy: GpStrategyKind },
+    ContainmentApplyFailed,
 }
 
 impl GpExecutionError {
@@ -65,6 +68,7 @@ impl GpExecutionError {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::StrategyUnavailable { .. } => "strategy_unavailable",
+            Self::ContainmentApplyFailed => "containment_apply_failed",
         }
     }
 }
@@ -125,7 +129,7 @@ impl SshGpRequest {
             trigger_kind: GpTriggerKind::SignalObserved,
             observed_at_secs,
             source_ip: event.ip,
-            username: None,
+            username: event.username.clone(),
             failure_reason: Some(event.reason),
             matched_failures: None,
             expires_at_secs: None,
@@ -194,7 +198,10 @@ impl GpExecutor {
                 GpStrategyKind::Observe => {
                     self.build_outcome(&request, GpExecutionStatus::Observed, None)
                 }
-                GpStrategyKind::Degrade | GpStrategyKind::Contain => self.build_outcome(
+                GpStrategyKind::Contain => {
+                    self.build_outcome(&request, GpExecutionStatus::Contained, None)
+                }
+                GpStrategyKind::Degrade => self.build_outcome(
                     &request,
                     GpExecutionStatus::FailedOpen,
                     Some(GpExecutionError::StrategyUnavailable {
@@ -258,6 +265,7 @@ impl GpExecutor {
                         result = outcome.status.as_str(),
                         ip = %outcome.source_ip,
                         observed_at_secs = ssh.observed_at_secs,
+                        username = ssh.username.as_deref().unwrap_or("unknown"),
                         failure_reason = ?ssh.failure_reason,
                         matched_failures = ?ssh.matched_failures,
                         expires_at_secs = ?ssh.expires_at_secs,
@@ -320,6 +328,7 @@ mod tests {
             enabled: true,
             strategy: GpStrategyKind::Observe,
             trigger_mode: GpTriggerMode::DecisionEmitted,
+            ..GpPolicy::default()
         });
         let outcome = executor.execute(ssh_request(GpTriggerKind::SignalObserved));
 
@@ -333,6 +342,7 @@ mod tests {
             enabled: true,
             strategy: GpStrategyKind::Observe,
             trigger_mode: GpTriggerMode::All,
+            ..GpPolicy::default()
         });
         let outcome = executor.execute(ssh_request(GpTriggerKind::DecisionEmitted));
 
@@ -341,11 +351,26 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_strategies_fail_open() {
+    fn contain_strategy_marks_outcome_as_contained() {
         let executor = GpExecutor::new(GpPolicy {
             enabled: true,
             strategy: GpStrategyKind::Contain,
             trigger_mode: GpTriggerMode::All,
+            ..GpPolicy::default()
+        });
+        let outcome = executor.execute(ssh_request(GpTriggerKind::DecisionEmitted));
+
+        assert_eq!(outcome.status, GpExecutionStatus::Contained);
+        assert!(outcome.error.is_none());
+    }
+
+    #[test]
+    fn degrade_strategy_still_fails_open() {
+        let executor = GpExecutor::new(GpPolicy {
+            enabled: true,
+            strategy: GpStrategyKind::Degrade,
+            trigger_mode: GpTriggerMode::All,
+            ..GpPolicy::default()
         });
         let outcome = executor.execute(ssh_request(GpTriggerKind::DecisionEmitted));
 
@@ -353,7 +378,7 @@ mod tests {
         assert_eq!(
             outcome.error,
             Some(GpExecutionError::StrategyUnavailable {
-                strategy: GpStrategyKind::Contain,
+                strategy: GpStrategyKind::Degrade,
             })
         );
     }

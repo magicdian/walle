@@ -20,6 +20,8 @@ pub enum DaemonError {
     RuntimeLock(#[from] RuntimeLockError),
     #[error("XDP operation failed: {0}")]
     Xdp(#[from] XdpError),
+    #[error("sshjail is unavailable for containment: {reason}")]
+    SshJailUnavailable { reason: String },
     #[error("requested interface '{interface}' is not declared in the loaded config")]
     InterfaceNotConfigured { interface: String },
     #[error("environment compatibility checks failed: {details}")]

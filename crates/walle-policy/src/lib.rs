@@ -103,7 +103,21 @@ impl WalleConfig {
 
     #[must_use]
     pub fn runtime_config_for(&self, interface: &InterfacePolicy) -> RuntimeConfig {
-        RuntimeConfig::new(self.policy.access.mode, interface.filters.icmp.mode)
+        self.runtime_config_for_ssh_jail_port(interface, self.ssh_policy().gp.sshjail.listen_port)
+    }
+
+    #[must_use]
+    pub fn runtime_config_for_ssh_jail_port(
+        &self,
+        interface: &InterfacePolicy,
+        ssh_jail_port: u16,
+    ) -> RuntimeConfig {
+        RuntimeConfig::new(
+            self.policy.access.mode,
+            interface.filters.icmp.mode,
+            self.ssh_policy().gp.sshjail.protected_port,
+            ssh_jail_port,
+        )
     }
 
     #[must_use]
@@ -120,9 +134,21 @@ impl WalleConfig {
 
     #[must_use]
     pub fn primary_runtime_config(&self) -> RuntimeConfig {
+        self.primary_runtime_config_for_ssh_jail_port(self.ssh_policy().gp.sshjail.listen_port)
+    }
+
+    #[must_use]
+    pub fn primary_runtime_config_for_ssh_jail_port(&self, ssh_jail_port: u16) -> RuntimeConfig {
         self.primary_interface()
-            .map(|interface| self.runtime_config_for(interface))
-            .unwrap_or_else(|| RuntimeConfig::new(self.policy.access.mode, IcmpMode::Disabled))
+            .map(|interface| self.runtime_config_for_ssh_jail_port(interface, ssh_jail_port))
+            .unwrap_or_else(|| {
+                RuntimeConfig::new(
+                    self.policy.access.mode,
+                    IcmpMode::Disabled,
+                    self.ssh_policy().gp.sshjail.protected_port,
+                    ssh_jail_port,
+                )
+            })
     }
 }
 
@@ -246,6 +272,8 @@ pub struct GpPolicy {
     pub strategy: GpStrategyKind,
     #[serde(default)]
     pub trigger_mode: GpTriggerMode,
+    #[serde(default)]
+    pub sshjail: SshJailPolicy,
 }
 
 impl Default for GpPolicy {
@@ -253,13 +281,101 @@ impl Default for GpPolicy {
         Self {
             enabled: false,
             strategy: GpStrategyKind::Observe,
-            trigger_mode: GpTriggerMode::All,
+            trigger_mode: GpTriggerMode::DecisionEmitted,
+            sshjail: SshJailPolicy::default(),
         }
     }
 }
 
 impl GpPolicy {
     fn validate(&self) -> Result<(), PolicyError> {
+        self.sshjail.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshJailHostnameStrategy {
+    Real,
+    Configured,
+    #[default]
+    Generated,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshJailPolicy {
+    #[serde(default = "default_protected_ssh_port")]
+    pub protected_port: u16,
+    #[serde(default = "default_sshjail_listen_port")]
+    pub listen_port: u16,
+    #[serde(default = "default_sshjail_max_sessions")]
+    pub max_sessions: usize,
+    #[serde(default = "default_sshjail_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_sshjail_max_session_duration_secs")]
+    pub max_session_duration_secs: u64,
+    #[serde(default = "default_sshjail_audit_dir")]
+    pub audit_dir: String,
+    #[serde(default)]
+    pub hostname_strategy: SshJailHostnameStrategy,
+    #[serde(default)]
+    pub fake_hostname: Option<String>,
+}
+
+impl Default for SshJailPolicy {
+    fn default() -> Self {
+        Self {
+            protected_port: default_protected_ssh_port(),
+            listen_port: default_sshjail_listen_port(),
+            max_sessions: default_sshjail_max_sessions(),
+            idle_timeout_secs: default_sshjail_idle_timeout_secs(),
+            max_session_duration_secs: default_sshjail_max_session_duration_secs(),
+            audit_dir: default_sshjail_audit_dir(),
+            hostname_strategy: SshJailHostnameStrategy::Generated,
+            fake_hostname: None,
+        }
+    }
+}
+
+impl SshJailPolicy {
+    fn validate(&self) -> Result<(), PolicyError> {
+        if self.protected_port == 0 {
+            return Err(PolicyError::InvalidSshProtectedPort);
+        }
+
+        if self.listen_port != 0 && self.listen_port == self.protected_port {
+            return Err(PolicyError::ConflictingSshJailPort {
+                port: self.listen_port,
+            });
+        }
+
+        if self.max_sessions == 0 {
+            return Err(PolicyError::InvalidSshJailMaxSessions);
+        }
+
+        if self.idle_timeout_secs == 0 {
+            return Err(PolicyError::InvalidSshJailIdleTimeout);
+        }
+
+        if self.max_session_duration_secs == 0 {
+            return Err(PolicyError::InvalidSshJailSessionDuration);
+        }
+
+        if self.audit_dir.trim().is_empty() {
+            return Err(PolicyError::EmptySshJailAuditDir);
+        }
+
+        if matches!(self.hostname_strategy, SshJailHostnameStrategy::Configured)
+            && self
+                .fake_hostname
+                .as_ref()
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+        {
+            return Err(PolicyError::MissingConfiguredSshJailHostname);
+        }
+
         Ok(())
     }
 }
@@ -270,6 +386,8 @@ pub struct SshProtectionPolicy {
     pub failure_threshold: u32,
     pub window_secs: u64,
     pub ban_duration_secs: u64,
+    #[serde(default)]
+    pub invalid_user_force_ban_enabled: bool,
     pub log_source_mode: SshLogSourceMode,
     #[serde(default)]
     pub log_file_paths: Vec<String>,
@@ -284,6 +402,7 @@ impl Default for SshProtectionPolicy {
             failure_threshold: 5,
             window_secs: 300,
             ban_duration_secs: 900,
+            invalid_user_force_ban_enabled: false,
             log_source_mode: SshLogSourceMode::Auto,
             log_file_paths: Vec::new(),
             gp: GpPolicy::default(),
@@ -472,6 +591,30 @@ const fn default_config_version() -> u32 {
     CONFIG_VERSION_V1
 }
 
+const fn default_protected_ssh_port() -> u16 {
+    22
+}
+
+const fn default_sshjail_listen_port() -> u16 {
+    0
+}
+
+const fn default_sshjail_max_sessions() -> usize {
+    32
+}
+
+const fn default_sshjail_idle_timeout_secs() -> u64 {
+    600
+}
+
+const fn default_sshjail_max_session_duration_secs() -> u64 {
+    3_600
+}
+
+fn default_sshjail_audit_dir() -> String {
+    "/tmp/walle/gp/ssh".to_string()
+}
+
 static DEFAULT_ICMP_POLICY: IcmpPolicy = IcmpPolicy {
     mode: IcmpMode::Disabled,
     allow_rules: Vec::new(),
@@ -497,6 +640,20 @@ pub enum PolicyError {
     InvalidSshWindow,
     #[error("SSH ban duration must be greater than zero")]
     InvalidBanDuration,
+    #[error("protected SSH port must be greater than zero")]
+    InvalidSshProtectedPort,
+    #[error("sshjail listen port {port} cannot match the protected SSH port")]
+    ConflictingSshJailPort { port: u16 },
+    #[error("sshjail max_sessions must be greater than zero")]
+    InvalidSshJailMaxSessions,
+    #[error("sshjail idle timeout must be greater than zero")]
+    InvalidSshJailIdleTimeout,
+    #[error("sshjail max session duration must be greater than zero")]
+    InvalidSshJailSessionDuration,
+    #[error("sshjail audit_dir cannot be empty")]
+    EmptySshJailAuditDir,
+    #[error("sshjail fake_hostname is required when hostname_strategy is configured")]
+    MissingConfiguredSshJailHostname,
     #[error("SSH log file paths cannot contain empty values")]
     EmptySshLogPath,
     #[error("interface names cannot be empty")]
@@ -532,8 +689,8 @@ mod tests {
 
     use super::{
         DetectorPolicies, GlobalPolicy, GpPolicy, GpStrategyKind, GpTriggerMode, IcmpAllowRule,
-        InterfaceFilters, InterfacePolicy, LogLevel, PolicyError, SshLogSourceMode,
-        SshProtectionPolicy, WalleConfig, DEFAULT_CONFIG_PATH,
+        InterfaceFilters, InterfacePolicy, LogLevel, PolicyError, SshJailHostnameStrategy,
+        SshLogSourceMode, SshProtectionPolicy, WalleConfig, DEFAULT_CONFIG_PATH,
     };
     use walle_common::{AccessMode, IcmpMatchType, IcmpMode};
 
@@ -546,7 +703,12 @@ mod tests {
         assert_eq!(config.logging_policy().level, LogLevel::Info);
         assert!(!config.ssh_policy().gp.enabled);
         assert_eq!(config.ssh_policy().gp.strategy, GpStrategyKind::Observe);
-        assert_eq!(config.ssh_policy().gp.trigger_mode, GpTriggerMode::All);
+        assert_eq!(
+            config.ssh_policy().gp.trigger_mode,
+            GpTriggerMode::DecisionEmitted
+        );
+        assert_eq!(config.ssh_policy().gp.sshjail.listen_port, 0);
+        assert_eq!(config.ssh_policy().gp.sshjail.audit_dir, "/tmp/walle/gp/ssh");
     }
 
     #[test]
@@ -561,6 +723,7 @@ mod tests {
             failure_threshold: 0,
             window_secs: 0,
             ban_duration_secs: 0,
+            invalid_user_force_ban_enabled: false,
             log_source_mode: SshLogSourceMode::Auto,
             log_file_paths: Vec::new(),
             gp: GpPolicy::default(),
@@ -589,6 +752,46 @@ mod tests {
         assert!(matches!(
             policy.validate(),
             Err(PolicyError::EmptySshLogPath)
+        ));
+    }
+
+    #[test]
+    fn configured_hostname_requires_value() {
+        let policy = SshProtectionPolicy {
+            gp: GpPolicy {
+                sshjail: super::SshJailPolicy {
+                    hostname_strategy: SshJailHostnameStrategy::Configured,
+                    fake_hostname: None,
+                    ..super::SshJailPolicy::default()
+                },
+                ..GpPolicy::default()
+            },
+            ..SshProtectionPolicy::default()
+        };
+
+        assert!(matches!(
+            policy.validate(),
+            Err(PolicyError::MissingConfiguredSshJailHostname)
+        ));
+    }
+
+    #[test]
+    fn sshjail_listen_port_cannot_match_protected_port() {
+        let policy = SshProtectionPolicy {
+            gp: GpPolicy {
+                sshjail: super::SshJailPolicy {
+                    protected_port: 22,
+                    listen_port: 22,
+                    ..super::SshJailPolicy::default()
+                },
+                ..GpPolicy::default()
+            },
+            ..SshProtectionPolicy::default()
+        };
+
+        assert!(matches!(
+            policy.validate(),
+            Err(PolicyError::ConflictingSshJailPort { port: 22 })
         ));
     }
 
@@ -634,6 +837,23 @@ mod tests {
 
         assert_eq!(runtime.access_mode, AccessMode::WhitelistOnly);
         assert_eq!(runtime.icmp_mode, IcmpMode::DropAll);
+    }
+
+    #[test]
+    fn runtime_config_can_override_dynamic_sshjail_port() {
+        let config = WalleConfig {
+            interfaces: vec![InterfacePolicy {
+                name: "eth0".to_string(),
+                xdp_mode: super::XdpMode::Driver,
+                filters: InterfaceFilters::default(),
+            }],
+            ..WalleConfig::default()
+        };
+
+        let runtime = config.runtime_config_for_ssh_jail_port(&config.interfaces()[0], 40222);
+
+        assert_eq!(runtime.protected_ssh_port, 22);
+        assert_eq!(runtime.ssh_jail_port, 40222);
     }
 
     #[test]
@@ -714,6 +934,7 @@ enabled = true
 failure_threshold = 5
 window_secs = 300
 ban_duration_secs = 900
+invalid_user_force_ban_enabled = true
 log_source_mode = "auto"
 log_file_paths = []
 
@@ -721,6 +942,16 @@ log_file_paths = []
 enabled = true
 strategy = "contain"
 trigger_mode = "decision_emitted"
+
+[detectors.ssh.gp.sshjail]
+protected_port = 22
+listen_port = 2222
+max_sessions = 64
+idle_timeout_secs = 600
+max_session_duration_secs = 3600
+audit_dir = "/tmp/walle/gp/ssh"
+hostname_strategy = "configured"
+fake_hostname = "web-01"
 
 [policy.access]
 mode = "blacklist_only"
@@ -753,10 +984,20 @@ enabled = true
             "09070108"
         );
         assert!(config.ssh_policy().gp.enabled);
+        assert!(config.ssh_policy().invalid_user_force_ban_enabled);
         assert_eq!(config.ssh_policy().gp.strategy, GpStrategyKind::Contain);
         assert_eq!(
             config.ssh_policy().gp.trigger_mode,
             GpTriggerMode::DecisionEmitted
+        );
+        assert_eq!(config.ssh_policy().gp.sshjail.max_sessions, 64);
+        assert_eq!(
+            config.ssh_policy().gp.sshjail.hostname_strategy,
+            SshJailHostnameStrategy::Configured
+        );
+        assert_eq!(
+            config.ssh_policy().gp.sshjail.fake_hostname.as_deref(),
+            Some("web-01")
         );
 
         let _ = fs::remove_file(path);

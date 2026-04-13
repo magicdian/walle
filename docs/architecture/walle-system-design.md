@@ -195,6 +195,27 @@ Policy note:
 
 * whitelist always wins over blacklist if the same IP exists in both
 
+### SSH Containment Maps
+
+Purpose:
+
+* hold source identities that should be redirected into `sshjail` on later SSH connection attempts
+
+Suggested fields:
+
+* `created_at`
+* `expires_at`
+* `trigger`
+  * invalid_user
+  * gp_signal_observed
+  * gp_decision_emitted
+
+Policy note:
+
+* containment state coexists with deny state
+* containment takes precedence only for SSH redirection decisions
+* if `sshjail` is unavailable or full, normal deny or drop behavior remains active
+
 ### ICMP Rule Maps
 
 Purpose:
@@ -271,6 +292,15 @@ write deny entry to BPF map with expiry metadata
       v
 XDP drops later packets from that source
 ```
+
+With `gp.strategy = "contain"` and `sshjail` enabled, the SSH flow gains a second path:
+
+* the default containment trigger is `decision_emitted`
+* after ban, later SSH connection attempts from that source are marked in a contain map
+* `tc` ingress and egress programs rewrite the SSH destination and source ports to a daemon-owned in-process `sshjail` listener
+* `sshjail` binds `0.0.0.0:0` by default, receives the kernel-assigned dynamic port at startup, and that real port is written into the runtime config map before traffic steering begins
+* if `invalid_user_force_ban_enabled = true`, explicit `Invalid user` log events can skip the threshold wait and go directly to a ban decision; whether later SSH attempts are dropped or redirected into `sshjail` is still controlled by the configured GP strategy
+* if `sshjail` reaches its session cap, new containment decisions fail open back to ban or drop rather than mutating host `iptables` or `nftables` state
 
 ### SSH Policy Model
 

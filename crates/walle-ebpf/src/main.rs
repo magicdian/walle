@@ -2,16 +2,17 @@
 #![no_main]
 
 use aya_ebpf::{
-    bindings::xdp_action,
-    macros::{map, xdp},
+    bindings::{TC_ACT_PIPE, xdp_action},
+    macros::{classifier, map, xdp},
     maps::{Array, HashMap},
-    programs::XdpContext,
+    programs::{TcContext, XdpContext},
 };
 use core::{mem, ptr};
 use walle_common::{
     ALLOW_MAP_CAPACITY, BanEntryV4, CONFIG_MAP_CAPACITY, CONFIG_MAP_KEY, DENY_MAP_CAPACITY,
     ICMP_RULE_MAP_CAPACITY, ICMP_RULE_PAYLOAD_CAPACITY, IcmpMatchType, IcmpRule, Ipv4AddrKey,
-    Ipv6AddrKey, PacketAction, RuntimeConfig, STATS_MAP_CAPACITY, STATS_MAP_KEY, StatsCounters,
+    Ipv6AddrKey, PacketAction, RuntimeConfig, SshContainEntry, STATS_MAP_CAPACITY, STATS_MAP_KEY,
+    StatsCounters,
 };
 
 #[map(name = "config")]
@@ -29,6 +30,12 @@ static DENY_V4: HashMap<Ipv4AddrKey, BanEntryV4> = HashMap::pinned(DENY_MAP_CAPA
 #[map(name = "deny_v6")]
 static DENY_V6: HashMap<Ipv6AddrKey, BanEntryV4> = HashMap::pinned(DENY_MAP_CAPACITY, 0);
 
+#[map(name = "contain_v4")]
+static CONTAIN_V4: HashMap<Ipv4AddrKey, SshContainEntry> = HashMap::pinned(DENY_MAP_CAPACITY, 0);
+
+#[map(name = "contain_v6")]
+static CONTAIN_V6: HashMap<Ipv6AddrKey, SshContainEntry> = HashMap::pinned(DENY_MAP_CAPACITY, 0);
+
 #[map(name = "icmp_rules")]
 static ICMP_RULES: HashMap<IcmpRule, u8> = HashMap::pinned(ICMP_RULE_MAP_CAPACITY, 0);
 
@@ -39,6 +46,9 @@ const ETH_P_IPV4: u16 = 0x0800;
 const ETH_P_IPV6: u16 = 0x86dd;
 const ETH_HEADER_LEN: usize = mem::size_of::<EthernetHeader>();
 const IPV6_HEADER_LEN: usize = mem::size_of::<Ipv6Header>();
+const TCP_DEST_OFFSET: usize = 2;
+const TCP_SOURCE_OFFSET: usize = 0;
+const TCP_CHECK_OFFSET: usize = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -72,6 +82,19 @@ struct Ipv6Header {
     hop_limit: u8,
     source: [u8; 16],
     destination: [u8; 16],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TcpHeader {
+    source: u16,
+    dest: u16,
+    seq: u32,
+    ack_seq: u32,
+    doff_flags: u16,
+    window: u16,
+    check: u16,
+    urg_ptr: u16,
 }
 
 #[xdp]
@@ -110,9 +133,19 @@ fn evaluate_ipv4(ctx: &XdpContext, config: &RuntimeConfig) -> Result<PacketActio
     let key = Ipv4AddrKey::new(ip.source);
     let is_whitelisted = unsafe { ALLOW_V4.get(&key).is_some() };
     let is_blacklisted = unsafe { DENY_V4.get(&key).is_some() };
+    let is_contained = unsafe { CONTAIN_V4.get(&key).is_some() };
     record_access_hits(is_whitelisted, is_blacklisted);
-    let base_action = walle_ebpf::xdp::evaluate_access(config, is_whitelisted, is_blacklisted);
     let protocol = ip.protocol;
+    let allow_contained_ssh = should_allow_contained_ssh_ipv4(
+        ctx,
+        config,
+        is_whitelisted,
+        is_blacklisted,
+        protocol,
+        header_length,
+        is_contained,
+    )?;
+    let base_action = allow_contained_ssh;
     let icmp_kind = classify_ipv4_icmp_packet(ctx, protocol, header_length)?;
     let rule_hit = maybe_match_icmp_rules(
         ctx,
@@ -140,9 +173,12 @@ fn evaluate_ipv6(ctx: &XdpContext, config: &RuntimeConfig) -> Result<PacketActio
     let key = Ipv6AddrKey::new(ip.source);
     let is_whitelisted = unsafe { ALLOW_V6.get(&key).is_some() };
     let is_blacklisted = unsafe { DENY_V6.get(&key).is_some() };
+    let is_contained = unsafe { CONTAIN_V6.get(&key).is_some() };
     record_access_hits(is_whitelisted, is_blacklisted);
-    let base_action = walle_ebpf::xdp::evaluate_access(config, is_whitelisted, is_blacklisted);
     let protocol = ip.next_header;
+    let allow_contained_ssh =
+        should_allow_contained_ssh_ipv6(ctx, config, is_whitelisted, is_blacklisted, protocol, is_contained)?;
+    let base_action = allow_contained_ssh;
     let icmp_kind = classify_ipv6_icmp_packet(ctx, protocol)?;
     let rule_hit = maybe_match_icmp_rules(
         ctx,
@@ -170,6 +206,63 @@ fn packet_action_to_xdp(action: PacketAction) -> u32 {
         PacketAction::Allow => xdp_action::XDP_PASS,
         PacketAction::Drop => xdp_action::XDP_DROP,
     }
+}
+
+fn should_allow_contained_ssh_ipv4(
+    ctx: &XdpContext,
+    config: &RuntimeConfig,
+    is_whitelisted: bool,
+    is_blacklisted: bool,
+    protocol: u8,
+    header_length: usize,
+    is_contained: bool,
+) -> Result<PacketAction, ()> {
+    if !is_contained || protocol != walle_ebpf::xdp::IPPROTO_TCP {
+        return Ok(walle_ebpf::xdp::evaluate_access(
+            config,
+            is_whitelisted,
+            is_blacklisted,
+        ));
+    }
+
+    let tcp_offset = ETH_HEADER_LEN + header_length;
+    let tcp: TcpHeader = read_unaligned(ctx, tcp_offset)?;
+    Ok(walle_ebpf::xdp::evaluate_access_with_containment(
+        config,
+        is_whitelisted,
+        is_blacklisted,
+        is_contained,
+        protocol,
+        u16::from_be(tcp.dest),
+    ))
+}
+
+fn should_allow_contained_ssh_ipv6(
+    ctx: &XdpContext,
+    config: &RuntimeConfig,
+    is_whitelisted: bool,
+    is_blacklisted: bool,
+    protocol: u8,
+    is_contained: bool,
+) -> Result<PacketAction, ()> {
+    if !is_contained || protocol != walle_ebpf::xdp::IPPROTO_TCP {
+        return Ok(walle_ebpf::xdp::evaluate_access(
+            config,
+            is_whitelisted,
+            is_blacklisted,
+        ));
+    }
+
+    let tcp_offset = ETH_HEADER_LEN + IPV6_HEADER_LEN;
+    let tcp: TcpHeader = read_unaligned(ctx, tcp_offset)?;
+    Ok(walle_ebpf::xdp::evaluate_access_with_containment(
+        config,
+        is_whitelisted,
+        is_blacklisted,
+        is_contained,
+        protocol,
+        u16::from_be(tcp.dest),
+    ))
 }
 
 fn verdict_metrics(action: PacketAction) -> VerdictMetrics {
@@ -323,6 +416,168 @@ fn read_unaligned<T: Copy>(ctx: &XdpContext, offset: usize) -> Result<T, ()> {
 
 fn read_u8(ctx: &XdpContext, offset: usize) -> Result<u8, ()> {
     read_unaligned::<u8>(ctx, offset)
+}
+
+#[classifier]
+pub fn walle_tc_ingress(ctx: TcContext) -> i32 {
+    match try_walle_tc_ingress(ctx) {
+        Ok(action) => action,
+        Err(action) => action,
+    }
+}
+
+#[classifier]
+pub fn walle_tc_egress(ctx: TcContext) -> i32 {
+    match try_walle_tc_egress(ctx) {
+        Ok(action) => action,
+        Err(action) => action,
+    }
+}
+
+fn try_walle_tc_ingress(mut ctx: TcContext) -> Result<i32, i32> {
+    let config = CONFIG.get(CONFIG_MAP_KEY).ok_or(TC_ACT_PIPE)?;
+    let ethernet: EthernetHeader = ctx.load(0).map_err(|_| TC_ACT_PIPE)?;
+
+    match u16::from_be(ethernet.ether_type) {
+        ETH_P_IPV4 => rewrite_ingress_ipv4(&mut ctx, config),
+        ETH_P_IPV6 => rewrite_ingress_ipv6(&mut ctx, config),
+        _ => Ok(TC_ACT_PIPE),
+    }
+}
+
+fn try_walle_tc_egress(mut ctx: TcContext) -> Result<i32, i32> {
+    let config = CONFIG.get(CONFIG_MAP_KEY).ok_or(TC_ACT_PIPE)?;
+    let ethernet: EthernetHeader = ctx.load(0).map_err(|_| TC_ACT_PIPE)?;
+
+    match u16::from_be(ethernet.ether_type) {
+        ETH_P_IPV4 => rewrite_egress_ipv4(&mut ctx, config),
+        ETH_P_IPV6 => rewrite_egress_ipv6(&mut ctx, config),
+        _ => Ok(TC_ACT_PIPE),
+    }
+}
+
+fn rewrite_ingress_ipv4(ctx: &mut TcContext, config: &RuntimeConfig) -> Result<i32, i32> {
+    let ip: Ipv4Header = ctx.load(ETH_HEADER_LEN).map_err(|_| TC_ACT_PIPE)?;
+    let header_length = ipv4_header_length(ip.version_ihl).map_err(|_| TC_ACT_PIPE)?;
+
+    if ip.protocol != walle_ebpf::xdp::IPPROTO_TCP {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    if unsafe { CONTAIN_V4.get(&Ipv4AddrKey::new(ip.source)).is_none() } {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    let tcp_offset = ETH_HEADER_LEN + header_length;
+    let tcp: TcpHeader = ctx.load(tcp_offset).map_err(|_| TC_ACT_PIPE)?;
+    if u16::from_be(tcp.dest) != config.protected_ssh_port {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    let new_port = config.ssh_jail_port.to_be();
+    ctx.l4_csum_replace(
+        tcp_offset + TCP_CHECK_OFFSET,
+        tcp.dest as u64,
+        new_port as u64,
+        2,
+    )
+    .map_err(|_| TC_ACT_PIPE)?;
+    ctx.store(tcp_offset + TCP_DEST_OFFSET, &new_port, 0)
+        .map_err(|_| TC_ACT_PIPE)?;
+
+    Ok(TC_ACT_PIPE)
+}
+
+fn rewrite_ingress_ipv6(ctx: &mut TcContext, config: &RuntimeConfig) -> Result<i32, i32> {
+    let ip: Ipv6Header = ctx.load(ETH_HEADER_LEN).map_err(|_| TC_ACT_PIPE)?;
+    if ip.next_header != walle_ebpf::xdp::IPPROTO_TCP {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    if unsafe { CONTAIN_V6.get(&Ipv6AddrKey::new(ip.source)).is_none() } {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    let tcp_offset = ETH_HEADER_LEN + IPV6_HEADER_LEN;
+    let tcp: TcpHeader = ctx.load(tcp_offset).map_err(|_| TC_ACT_PIPE)?;
+    if u16::from_be(tcp.dest) != config.protected_ssh_port {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    let new_port = config.ssh_jail_port.to_be();
+    ctx.l4_csum_replace(
+        tcp_offset + TCP_CHECK_OFFSET,
+        tcp.dest as u64,
+        new_port as u64,
+        2,
+    )
+    .map_err(|_| TC_ACT_PIPE)?;
+    ctx.store(tcp_offset + TCP_DEST_OFFSET, &new_port, 0)
+        .map_err(|_| TC_ACT_PIPE)?;
+
+    Ok(TC_ACT_PIPE)
+}
+
+fn rewrite_egress_ipv4(ctx: &mut TcContext, config: &RuntimeConfig) -> Result<i32, i32> {
+    let ip: Ipv4Header = ctx.load(ETH_HEADER_LEN).map_err(|_| TC_ACT_PIPE)?;
+    let header_length = ipv4_header_length(ip.version_ihl).map_err(|_| TC_ACT_PIPE)?;
+
+    if ip.protocol != walle_ebpf::xdp::IPPROTO_TCP {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    if unsafe { CONTAIN_V4.get(&Ipv4AddrKey::new(ip.destination)).is_none() } {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    let tcp_offset = ETH_HEADER_LEN + header_length;
+    let tcp: TcpHeader = ctx.load(tcp_offset).map_err(|_| TC_ACT_PIPE)?;
+    if u16::from_be(tcp.source) != config.ssh_jail_port {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    let new_port = config.protected_ssh_port.to_be();
+    ctx.l4_csum_replace(
+        tcp_offset + TCP_CHECK_OFFSET,
+        tcp.source as u64,
+        new_port as u64,
+        2,
+    )
+    .map_err(|_| TC_ACT_PIPE)?;
+    ctx.store(tcp_offset + TCP_SOURCE_OFFSET, &new_port, 0)
+        .map_err(|_| TC_ACT_PIPE)?;
+
+    Ok(TC_ACT_PIPE)
+}
+
+fn rewrite_egress_ipv6(ctx: &mut TcContext, config: &RuntimeConfig) -> Result<i32, i32> {
+    let ip: Ipv6Header = ctx.load(ETH_HEADER_LEN).map_err(|_| TC_ACT_PIPE)?;
+    if ip.next_header != walle_ebpf::xdp::IPPROTO_TCP {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    if unsafe { CONTAIN_V6.get(&Ipv6AddrKey::new(ip.destination)).is_none() } {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    let tcp_offset = ETH_HEADER_LEN + IPV6_HEADER_LEN;
+    let tcp: TcpHeader = ctx.load(tcp_offset).map_err(|_| TC_ACT_PIPE)?;
+    if u16::from_be(tcp.source) != config.ssh_jail_port {
+        return Ok(TC_ACT_PIPE);
+    }
+
+    let new_port = config.protected_ssh_port.to_be();
+    ctx.l4_csum_replace(
+        tcp_offset + TCP_CHECK_OFFSET,
+        tcp.source as u64,
+        new_port as u64,
+        2,
+    )
+    .map_err(|_| TC_ACT_PIPE)?;
+    ctx.store(tcp_offset + TCP_SOURCE_OFFSET, &new_port, 0)
+        .map_err(|_| TC_ACT_PIPE)?;
+
+    Ok(TC_ACT_PIPE)
 }
 
 #[panic_handler]

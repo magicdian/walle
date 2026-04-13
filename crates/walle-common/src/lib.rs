@@ -11,12 +11,16 @@ pub const ALLOW_MAP_CAPACITY: u32 = 4096;
 pub const DENY_MAP_CAPACITY: u32 = 4096;
 pub const ICMP_RULE_MAP_CAPACITY: u32 = 256;
 pub const XDP_PROGRAM_NAME: &str = "walle_ingress";
+pub const TC_INGRESS_PROGRAM_NAME: &str = "walle_tc_ingress";
+pub const TC_EGRESS_PROGRAM_NAME: &str = "walle_tc_egress";
 pub const DEFAULT_MAP_PIN_PATH: &str = "/sys/fs/bpf/walle";
 pub const MAP_NAME_CONFIG: &str = "config";
 pub const MAP_NAME_ALLOW_V4: &str = "allow_v4";
 pub const MAP_NAME_ALLOW_V6: &str = "allow_v6";
 pub const MAP_NAME_DENY_V4: &str = "deny_v4";
 pub const MAP_NAME_DENY_V6: &str = "deny_v6";
+pub const MAP_NAME_CONTAIN_V4: &str = "contain_v4";
+pub const MAP_NAME_CONTAIN_V6: &str = "contain_v6";
 pub const MAP_NAME_ICMP_RULES: &str = "icmp_rules";
 pub const MAP_NAME_STATS: &str = "stats";
 
@@ -134,24 +138,33 @@ pub struct RuntimeConfig {
     pub icmp_mode: IcmpMode,
     pub default_action: PacketAction,
     pub flags: u32,
+    pub protected_ssh_port: u16,
+    pub ssh_jail_port: u16,
 }
 
 impl RuntimeConfig {
     #[must_use]
-    pub const fn new(access_mode: AccessMode, icmp_mode: IcmpMode) -> Self {
+    pub const fn new(
+        access_mode: AccessMode,
+        icmp_mode: IcmpMode,
+        protected_ssh_port: u16,
+        ssh_jail_port: u16,
+    ) -> Self {
         Self {
-            version: 1,
+            version: 2,
             access_mode,
             icmp_mode,
             default_action: PacketAction::Allow,
             flags: 0,
+            protected_ssh_port,
+            ssh_jail_port,
         }
     }
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        Self::new(AccessMode::BlacklistOnly, IcmpMode::Disabled)
+        Self::new(AccessMode::BlacklistOnly, IcmpMode::Disabled, 22, 2222)
     }
 }
 
@@ -186,6 +199,55 @@ impl BanEntryV4 {
             source: BanSource::Manual,
             reason: BanReasonCode::Manual,
             flags: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum SshContainTrigger {
+    InvalidUser = 0,
+    GpSignalObserved = 1,
+    GpDecisionEmitted = 2,
+}
+
+impl Default for SshContainTrigger {
+    fn default() -> Self {
+        Self::GpDecisionEmitted
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(C)]
+pub struct SshContainEntry {
+    pub expires_at_ns: u64,
+    pub created_at_ns: u64,
+    pub trigger: SshContainTrigger,
+    pub flags: u16,
+    pub reserved: u16,
+}
+
+impl Default for SshContainEntry {
+    fn default() -> Self {
+        Self {
+            expires_at_ns: 0,
+            created_at_ns: 0,
+            trigger: SshContainTrigger::GpDecisionEmitted,
+            flags: 0,
+            reserved: 0,
+        }
+    }
+}
+
+impl SshContainEntry {
+    #[must_use]
+    pub const fn new(created_at_ns: u64, expires_at_ns: u64, trigger: SshContainTrigger) -> Self {
+        Self {
+            expires_at_ns,
+            created_at_ns,
+            trigger,
+            flags: 0,
+            reserved: 0,
         }
     }
 }
@@ -264,7 +326,10 @@ pub struct StatsCounters {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccessMode, BanEntryV4, IcmpRule, PacketAction};
+    use super::{
+        AccessMode, BanEntryV4, IcmpRule, PacketAction, RuntimeConfig, SshContainEntry,
+        SshContainTrigger,
+    };
 
     #[test]
     fn whitelist_always_wins_even_if_blacklisted() {
@@ -289,12 +354,30 @@ mod tests {
         assert_eq!(entry.created_at_ns, 42);
         assert_eq!(entry.expires_at_ns, 0);
     }
+
+    #[test]
+    fn runtime_config_defaults_include_ssh_ports() {
+        let config = RuntimeConfig::default();
+        assert_eq!(config.version, 2);
+        assert_eq!(config.protected_ssh_port, 22);
+        assert_eq!(config.ssh_jail_port, 2222);
+    }
+
+    #[test]
+    fn ssh_contain_entry_preserves_trigger_and_lifetime() {
+        let entry = SshContainEntry::new(10, 20, SshContainTrigger::InvalidUser);
+        assert_eq!(entry.created_at_ns, 10);
+        assert_eq!(entry.expires_at_ns, 20);
+        assert_eq!(entry.trigger, SshContainTrigger::InvalidUser);
+    }
 }
 
 #[cfg(target_os = "linux")]
 unsafe impl aya::Pod for RuntimeConfig {}
 #[cfg(target_os = "linux")]
 unsafe impl aya::Pod for BanEntryV4 {}
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for SshContainEntry {}
 #[cfg(target_os = "linux")]
 unsafe impl aya::Pod for Ipv4AddrKey {}
 #[cfg(target_os = "linux")]

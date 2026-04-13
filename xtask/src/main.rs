@@ -178,7 +178,7 @@ fn emit_bpftool_config(args: Vec<String>) -> Result<()> {
     let access_mode = parse_access_mode(&args[0])?;
     let icmp_mode = parse_icmp_mode(&args[1])?;
     let map_path = args.get(2).cloned().unwrap_or_else(default_config_map_path);
-    let config = RuntimeConfig::new(access_mode, icmp_mode);
+    let config = RuntimeConfig::new(access_mode, icmp_mode, 22, 2222);
 
     println!(
         "{}",
@@ -444,13 +444,15 @@ fn run_command(mut command: Command, failure_message: &str) -> Result<()> {
 }
 
 fn serialize_runtime_config(config: RuntimeConfig) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(12);
+    let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(&config.version.to_ne_bytes());
     bytes.push(config.access_mode as u8);
     bytes.push(config.icmp_mode as u8);
     bytes.push(config.default_action as u8);
     bytes.extend_from_slice(&[0, 0, 0]);
     bytes.extend_from_slice(&config.flags.to_ne_bytes());
+    bytes.extend_from_slice(&config.protected_ssh_port.to_ne_bytes());
+    bytes.extend_from_slice(&config.ssh_jail_port.to_ne_bytes());
     bytes
 }
 
@@ -517,9 +519,14 @@ mod tests {
         let bytes = serialize_runtime_config(RuntimeConfig::new(
             AccessMode::BlacklistOnly,
             IcmpMode::AllowRulesActive,
+            22,
+            2222,
         ));
 
-        assert_eq!(bytes, vec![1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            bytes,
+            vec![2, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 22, 0, 174, 8]
+        );
     }
 
     #[test]

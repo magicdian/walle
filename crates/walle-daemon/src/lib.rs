@@ -10,23 +10,25 @@ pub mod gp;
 pub mod install;
 pub mod logging;
 pub mod runtime;
+pub mod sshjail;
 pub mod xdp;
 
 use tracing::{debug, info, warn};
 use walle_common::{AccessMode, IcmpMode, MAP_NAME_CONFIG, StatsCounters};
-use walle_policy::{InterfacePolicy, WalleConfig};
+use walle_policy::{GpStrategyKind, InterfacePolicy, WalleConfig};
 
 use crate::detector::{
-    SshBanDecision, SshDetectorService, SshFailureEvent, SshIngestSummary, SshLiveIngestor,
-    SshLiveSourceMode, SshLogIngestor, SshResolvedLogSource,
+    SshBanDecision, SshDetectorService, SshFailureEvent, SshFailureReason, SshIngestSummary,
+    SshLiveIngestor, SshLiveSourceMode, SshLogIngestor, SshResolvedLogSource,
 };
 pub use crate::error::{DaemonError, RuntimeLockError};
-use crate::gp::{GpAdapterRequest, GpExecutionOutcome, GpExecutor, SshGpRequest};
+use crate::gp::{GpAdapterRequest, GpExecutionOutcome, GpExecutionStatus, GpExecutor, SshGpRequest};
 use crate::logging::format_unix_timestamp_secs;
 use crate::runtime::{
     BanRecord, EnvironmentReport, RuntimeBackendKind, RuntimeController, RuntimeSnapshot,
     log_environment_report, verify_environment,
 };
+use crate::sshjail::SshJailService;
 pub use crate::xdp::XdpError;
 use crate::xdp::{XdpAttachment, attach, map_pin_path_for_interface};
 
@@ -111,6 +113,7 @@ pub struct WalleDaemon {
     ssh_live_ingestor: SshLiveIngestor,
     ssh_poll_ingestor: SshLogIngestor,
     runtimes: Vec<InterfaceRuntime>,
+    ssh_jail: Option<SshJailService>,
     config: WalleConfig,
     options: DaemonOptions,
 }
@@ -151,6 +154,7 @@ impl WalleDaemon {
             ssh_live_ingestor,
             ssh_poll_ingestor,
             runtimes,
+            ssh_jail: None,
             config,
             options,
         })
@@ -189,6 +193,8 @@ impl WalleDaemon {
             });
         }
 
+        self.start_sshjail_if_needed();
+
         for runtime in &mut self.runtimes {
             runtime.xdp = Some(attach(
                 runtime.interface.name.as_str(),
@@ -214,11 +220,21 @@ impl WalleDaemon {
         self.gp_executor.log_startup();
         self.ssh_live_ingestor.log_startup();
         let observed_at_secs = unix_timestamp_secs();
+        let ssh_jail_port = self
+            .ssh_jail
+            .as_ref()
+            .map(SshJailService::bound_port)
+            .unwrap_or(self.config.ssh_policy().gp.sshjail.listen_port);
         for runtime in &mut self.runtimes {
             runtime
                 .runtime
-                .sync_policy_for_interface(&self.config, &runtime.interface)?;
+                .sync_policy_for_interface_with_ssh_jail_port(
+                    &self.config,
+                    &runtime.interface,
+                    ssh_jail_port,
+                )?;
             runtime.runtime.expire_bans(observed_at_secs)?;
+            runtime.runtime.expire_ssh_contain(observed_at_secs)?;
         }
 
         info!(
@@ -292,6 +308,7 @@ impl WalleDaemon {
             let observed_at_secs = unix_timestamp_secs();
             for runtime in &mut self.runtimes {
                 runtime.runtime.expire_bans(observed_at_secs)?;
+                runtime.runtime.expire_ssh_contain(observed_at_secs)?;
             }
 
             match self.read_live_ssh_sources(observed_at_secs, poll_interval) {
@@ -488,6 +505,7 @@ impl WalleDaemon {
         let observed_at_secs = unix_timestamp_secs();
         for runtime in &mut self.runtimes {
             runtime.runtime.expire_bans(observed_at_secs)?;
+            runtime.runtime.expire_ssh_contain(observed_at_secs)?;
             runtime
                 .runtime
                 .add_manual_ban(ip, observed_at_secs, duration_secs)?;
@@ -503,6 +521,8 @@ impl WalleDaemon {
         let mut removed = 0;
         for runtime in &mut self.runtimes {
             runtime.runtime.expire_bans(observed_at_secs)?;
+            runtime.runtime.expire_ssh_contain(observed_at_secs)?;
+            let _ = runtime.runtime.remove_ssh_contain(ip)?;
             if runtime.runtime.remove_ban(ip)? {
                 removed += 1;
             }
@@ -520,6 +540,7 @@ impl WalleDaemon {
 
         for runtime in &mut self.runtimes {
             runtime.runtime.expire_bans(observed_at_secs)?;
+            runtime.runtime.expire_ssh_contain(observed_at_secs)?;
             let bans = runtime.runtime.list_bans()?;
             total_bans += bans.len();
             interfaces.push(InterfaceBanSnapshot {
@@ -580,7 +601,9 @@ impl WalleDaemon {
 
         if let Some(event) = event.clone() {
             self.execute_ssh_gp_for_failure(&event, observed_at_secs);
-            let decision = self.detector.observe_failure(event.ip, observed_at_secs);
+            let decision = self
+                .apply_invalid_user_force_ban(&event, observed_at_secs)
+                .or_else(|| self.detector.observe_failure(event.ip, observed_at_secs));
 
             if let Some(ban) = decision.clone() {
                 self.apply_ssh_ban_to_all(ban.clone())?;
@@ -594,22 +617,69 @@ impl WalleDaemon {
     }
 
     fn execute_ssh_gp_for_failure(
-        &self,
+        &mut self,
         event: &SshFailureEvent,
         observed_at_secs: u64,
     ) -> GpExecutionOutcome {
-        self.gp_executor
+        let mut outcome = self
+            .gp_executor
             .execute(GpAdapterRequest::Ssh(SshGpRequest::from_failure_event(
                 event,
                 observed_at_secs,
-            )))
+            )));
+
+        if matches!(outcome.status, GpExecutionStatus::Contained) {
+            let expires_at_secs = observed_at_secs.saturating_add(self.config.ssh_policy().ban_duration_secs);
+            if let Err(error) = self.apply_ssh_contain_to_all(
+                event.ip,
+                observed_at_secs,
+                expires_at_secs,
+                walle_common::SshContainTrigger::GpSignalObserved,
+            ) {
+                warn!(
+                    component = "gp",
+                    event = "contain_apply_failed",
+                    ip = %event.ip,
+                    observed_at_secs,
+                    error = %error,
+                    "failed to apply SSH containment after signal observation"
+                );
+                outcome.status = GpExecutionStatus::FailedOpen;
+                outcome.error = Some(crate::gp::GpExecutionError::ContainmentApplyFailed);
+            }
+        }
+
+        outcome
     }
 
-    fn execute_ssh_gp_for_decision(&self, decision: &SshBanDecision) -> GpExecutionOutcome {
-        self.gp_executor
+    fn execute_ssh_gp_for_decision(&mut self, decision: &SshBanDecision) -> GpExecutionOutcome {
+        let mut outcome = self
+            .gp_executor
             .execute(GpAdapterRequest::Ssh(SshGpRequest::from_ban_decision(
                 decision,
-            )))
+            )));
+
+        if matches!(outcome.status, GpExecutionStatus::Contained)
+            && let Err(error) = self.apply_ssh_contain_to_all(
+                decision.ip,
+                decision.observed_at_secs,
+                decision.expires_at_secs,
+                walle_common::SshContainTrigger::GpDecisionEmitted,
+            )
+        {
+            warn!(
+                component = "gp",
+                event = "contain_apply_failed",
+                ip = %decision.ip,
+                observed_at_secs = decision.observed_at_secs,
+                error = %error,
+                "failed to apply SSH containment after ban decision"
+            );
+            outcome.status = GpExecutionStatus::FailedOpen;
+            outcome.error = Some(crate::gp::GpExecutionError::ContainmentApplyFailed);
+        }
+
+        outcome
     }
 
     fn apply_ssh_ban_to_all(&mut self, decision: SshBanDecision) -> Result<(), DaemonError> {
@@ -620,12 +690,91 @@ impl WalleDaemon {
         Ok(())
     }
 
+    fn apply_ssh_contain_to_all(
+        &mut self,
+        ip: std::net::IpAddr,
+        observed_at_secs: u64,
+        expires_at_secs: u64,
+        trigger: walle_common::SshContainTrigger,
+    ) -> Result<(), DaemonError> {
+        let Some(ssh_jail) = self.ssh_jail.as_ref() else {
+            return Err(DaemonError::SshJailUnavailable {
+                reason: "sshjail listener is not running".to_string(),
+            });
+        };
+
+        if !ssh_jail.can_accept_new_session() {
+            return Err(DaemonError::SshJailUnavailable {
+                reason: "sshjail session capacity is exhausted".to_string(),
+            });
+        }
+
+        for runtime in &mut self.runtimes {
+            runtime
+                .runtime
+                .apply_ssh_contain(ip, observed_at_secs, expires_at_secs, trigger)?;
+        }
+
+        Ok(())
+    }
+
+    fn apply_invalid_user_force_ban(
+        &mut self,
+        event: &SshFailureEvent,
+        observed_at_secs: u64,
+    ) -> Option<SshBanDecision> {
+        if !self.config.ssh_policy().invalid_user_force_ban_enabled
+            || !matches!(event.reason, SshFailureReason::InvalidUser)
+        {
+            return None;
+        }
+
+        let decision = self.detector.force_ban(event.ip, observed_at_secs);
+        if let Some(decision) = decision.as_ref() {
+            debug!(
+                component = "ssh-detector",
+                event = "invalid_user_force_ban_triggered",
+                ip = %event.ip,
+                username = event.username.as_deref().unwrap_or("unknown"),
+                observed_at_secs,
+                expires_at_secs = decision.expires_at_secs,
+                "triggered immediate SSH ban for an invalid user attempt"
+            );
+        }
+
+        decision
+    }
+
     fn ensure_live_runtime_backends(&mut self, action: &'static str) -> Result<(), DaemonError> {
         if self.connect_existing_runtime_backends()? == 0 {
             return Err(DaemonError::NoActiveRuntime { action });
         }
 
         Ok(())
+    }
+
+    fn start_sshjail_if_needed(&mut self) {
+        if !self.requires_sshjail() || self.ssh_jail.is_some() {
+            return;
+        }
+
+        match SshJailService::start(&self.config.ssh_policy().gp.sshjail) {
+            Ok(service) => {
+                self.ssh_jail = Some(service);
+            }
+            Err(error) => {
+                warn!(
+                    component = "sshjail",
+                    event = "startup_failed",
+                    error = %error,
+                    "failed to start sshjail; containment will fail open"
+                );
+            }
+        }
+    }
+
+    fn requires_sshjail(&self) -> bool {
+        matches!(self.config.ssh_policy().gp.strategy, GpStrategyKind::Contain)
     }
 }
 
@@ -918,6 +1067,47 @@ mod tests {
     }
 
     #[test]
+    fn invalid_user_force_ban_emits_immediate_ban_decision() {
+        let mut config = config_with_interfaces();
+        config.detectors.ssh.invalid_user_force_ban_enabled = true;
+
+        let mut daemon = WalleDaemon::new(config, DaemonOptions::default())
+            .expect("declared interfaces should be accepted");
+
+        let decision = daemon
+            .process_ssh_log_line(
+                "Apr 13 12:00:00 host sshd[123]: Invalid user admin from 198.51.100.42 port 22 ssh2",
+                10,
+            )
+            .expect("invalid-user line should be processed")
+            .expect("invalid-user fast path should emit a ban decision");
+
+        assert_eq!(
+            decision.ip,
+            "198.51.100.42"
+                .parse::<std::net::IpAddr>()
+                .expect("test IP should parse")
+        );
+        assert_eq!(decision.matched_failures, 1);
+        assert_eq!(decision.observed_at_secs, 10);
+        assert_eq!(decision.expires_at_secs, 910);
+
+        let snapshot = daemon.snapshot();
+        assert_eq!(snapshot.totals.deny_v4_entries, 2);
+    }
+
+    #[test]
+    fn invalid_user_force_ban_does_not_require_sshjail() {
+        let mut config = config_with_interfaces();
+        config.detectors.ssh.invalid_user_force_ban_enabled = true;
+
+        let daemon = WalleDaemon::new(config, DaemonOptions::default())
+            .expect("declared interfaces should be accepted");
+
+        assert!(!daemon.requires_sshjail());
+    }
+
+    #[test]
     fn daemon_rejects_unknown_interface_override() {
         let result = WalleDaemon::new(
             config_with_interfaces(),
@@ -952,11 +1142,12 @@ mod tests {
 
     #[test]
     fn ssh_gp_pre_ban_trigger_uses_signal_observed_boundary() {
-        let daemon = WalleDaemon::new(
+        let mut daemon = WalleDaemon::new(
             config_with_gp(GpPolicy {
                 enabled: true,
                 strategy: GpStrategyKind::Observe,
                 trigger_mode: GpTriggerMode::SignalObserved,
+                ..GpPolicy::default()
             }),
             DaemonOptions::default(),
         )
@@ -966,6 +1157,7 @@ mod tests {
             &SshFailureEvent {
                 ip: "198.51.100.10".parse().expect("test IP should parse"),
                 reason: SshFailureReason::FailedPassword,
+                username: Some("root".to_string()),
             },
             10,
         );
@@ -975,11 +1167,12 @@ mod tests {
 
     #[test]
     fn ssh_gp_post_ban_trigger_is_filtered_when_only_pre_ban_is_enabled() {
-        let daemon = WalleDaemon::new(
+        let mut daemon = WalleDaemon::new(
             config_with_gp(GpPolicy {
                 enabled: true,
                 strategy: GpStrategyKind::Observe,
                 trigger_mode: GpTriggerMode::SignalObserved,
+                ..GpPolicy::default()
             }),
             DaemonOptions::default(),
         )
@@ -1002,6 +1195,7 @@ mod tests {
                 enabled: true,
                 strategy: GpStrategyKind::Contain,
                 trigger_mode: GpTriggerMode::All,
+                ..GpPolicy::default()
             }),
             DaemonOptions::default(),
         )

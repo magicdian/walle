@@ -165,3 +165,77 @@ Current scaffold examples:
 #### Correct
 
 * Keep a generic GP core for strategy / trigger / outcome semantics, and translate SSH-specific detector events into that core through an adapter-specific request type.
+
+## Scenario: SSH Jail Containment And Invalid-User Force-Ban Contract
+
+### 1. Scope / Trigger
+
+* Trigger: Any change to `sshjail`, SSH detector fast-ban behavior, SSH containment map semantics, XDP/tc SSH steering, or policy fields under `[detectors.ssh]` and `[detectors.ssh.gp]`.
+
+### 2. Signatures
+
+* `walle_policy::SshProtectionPolicy { invalid_user_force_ban_enabled: bool, gp: GpPolicy }`
+* `walle_policy::GpPolicy { strategy: GpStrategyKind, trigger_mode: GpTriggerMode, sshjail: SshJailPolicy }`
+* `walle_daemon::detector::SshDetectorService::force_ban(IpAddr, u64) -> Option<SshBanDecision>`
+* `walle_daemon::WalleDaemon::process_ssh_log_line(&str, u64) -> Result<Option<SshBanDecision>, DaemonError>`
+* `walle_daemon::WalleDaemon::apply_ssh_ban_to_all(SshBanDecision) -> Result<(), DaemonError>`
+* `walle_daemon::WalleDaemon::apply_ssh_contain_to_all(IpAddr, u64, u64, SshContainTrigger) -> Result<(), DaemonError>`
+* `walle_daemon::runtime::RuntimeController::apply_ssh_contain(...) -> Result<(), DaemonError>`
+* `walle_ebpf::xdp::evaluate_access_with_containment(&RuntimeConfig, bool, bool, bool, u8, u16) -> PacketAction`
+
+### 3. Contracts
+
+* `invalid_user_force_ban_enabled = true` means explicit `Invalid user` log lines bypass the SSH failure threshold and emit an immediate `SshBanDecision`.
+* The invalid-user fast path is ban-only. It must not directly redirect traffic into `sshjail`.
+* Whether later SSH attempts enter `sshjail` is controlled only by GP containment:
+  * `strategy = "contain"`
+  * matching `trigger_mode`
+* `gp.trigger_mode = "decision_emitted"` means the contain entry is written only after a ban decision exists.
+* A source may exist in both deny and contain maps at the same time.
+* For contained sources, only TCP traffic targeting `RuntimeConfig.protected_ssh_port` may bypass XDP deny so tc ingress can rewrite it to `RuntimeConfig.ssh_jail_port`.
+* Non-SSH traffic from the same banned source must still be dropped by XDP.
+* If `sshjail` is unavailable or full, GP containment must fail open back to normal ban/drop behavior.
+
+### 4. Validation & Error Matrix
+
+* valid config with `invalid_user_force_ban_enabled = false` -> invalid-user lines follow the normal threshold path
+* valid config with `invalid_user_force_ban_enabled = true` and GP disabled -> invalid-user lines ban immediately; later traffic is dropped
+* valid config with `invalid_user_force_ban_enabled = true`, `gp.enabled = true`, `strategy = "contain"`, `trigger_mode = "decision_emitted"` -> invalid-user lines ban immediately and later SSH attempts are redirected to `sshjail`
+* contain entry present + deny entry present + TCP destination is protected SSH port -> XDP must return `Allow`
+* contain entry present + deny entry present + TCP destination is not protected SSH port -> XDP must return `Drop`
+* contain entry present + deny entry present + non-TCP traffic -> XDP must return `Drop`
+
+### 5. Good/Base/Bad Cases
+
+* Good:
+  * first invalid-user attempt hits the real `sshd`, produces one log line, and emits an immediate ban decision
+  * second SSH attempt from the same source is passed through XDP, rewritten by tc, and lands in `sshjail`
+  * ICMP and non-SSH TCP from the same source continue to be dropped
+* Base:
+  * normal failed-password traffic still uses threshold counting when `invalid_user_force_ban_enabled` is off
+* Bad:
+  * invalid-user fast path directly writes contain without a ban decision
+  * XDP deny takes precedence over contain for protected SSH traffic and prevents tc redirect from ever running
+  * contain is treated as a general allow for all traffic from a banned source
+
+### 6. Tests Required
+
+* policy parsing tests must assert `invalid_user_force_ban_enabled` is loaded from TOML
+* daemon tests must assert:
+  * invalid-user fast path emits a one-shot `SshBanDecision`
+  * invalid-user fast path does not require `sshjail` by itself
+  * post-ban GP containment still preserves baseline ban flow
+* `walle-ebpf` tests must assert:
+  * contained SSH traffic overrides deny for the protected SSH port
+  * contained non-SSH TCP does not override deny
+  * contained non-TCP traffic does not override deny
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+* Treat `invalid_user_force_ban_enabled` as a direct redirect switch and couple it to `sshjail` startup or contain-map writes.
+
+#### Correct
+
+* Keep invalid-user fast handling as a detector-side ban shortcut, and let GP containment decide whether later SSH attempts are redirected after the ban decision boundary.

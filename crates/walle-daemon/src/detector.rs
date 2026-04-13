@@ -60,6 +60,7 @@ struct SshLiveSourceCapabilities {
 pub struct SshFailureEvent {
     pub ip: IpAddr,
     pub reason: SshFailureReason,
+    pub username: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +69,7 @@ pub enum SshFailureReason {
     InvalidUser,
     PamAuthFailure,
     MaxAuthAttemptsExceeded,
+    PreauthConnectionClosed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,6 +256,27 @@ impl SshDetectorService {
         Some(SshBanDecision {
             ip,
             matched_failures,
+            observed_at_secs,
+            expires_at_secs,
+        })
+    }
+
+    pub fn force_ban(&mut self, ip: IpAddr, observed_at_secs: u64) -> Option<SshBanDecision> {
+        if let Some(expires_at_secs) = self.active_bans.get(&ip) {
+            if *expires_at_secs > observed_at_secs {
+                return None;
+            }
+            self.active_bans.remove(&ip);
+        }
+
+        self.failures_by_ip.remove(&ip);
+
+        let expires_at_secs = observed_at_secs.saturating_add(self.policy.ban_duration_secs);
+        self.active_bans.insert(ip, expires_at_secs);
+
+        Some(SshBanDecision {
+            ip,
+            matched_failures: 1,
             observed_at_secs,
             expires_at_secs,
         })
@@ -1110,6 +1133,7 @@ fn parse_failure_event(line: &str) -> Option<SshFailureEvent> {
         return extract_ip_after_from(line).map(|ip| SshFailureEvent {
             ip,
             reason: SshFailureReason::FailedPassword,
+            username: extract_username_after_failed_password(line),
         });
     }
 
@@ -1117,6 +1141,7 @@ fn parse_failure_event(line: &str) -> Option<SshFailureEvent> {
         return extract_ip_after_from(line).map(|ip| SshFailureEvent {
             ip,
             reason: SshFailureReason::InvalidUser,
+            username: extract_username_after_invalid_user(line),
         });
     }
 
@@ -1124,6 +1149,7 @@ fn parse_failure_event(line: &str) -> Option<SshFailureEvent> {
         return extract_ip_after_from(line).map(|ip| SshFailureEvent {
             ip,
             reason: SshFailureReason::MaxAuthAttemptsExceeded,
+            username: extract_username_after_generic_for(line),
         });
     }
 
@@ -1131,6 +1157,15 @@ fn parse_failure_event(line: &str) -> Option<SshFailureEvent> {
         return extract_ip_after_key(line, "rhost=").map(|ip| SshFailureEvent {
             ip,
             reason: SshFailureReason::PamAuthFailure,
+            username: extract_token_after_key(line, "user="),
+        });
+    }
+
+    if let Some((username, ip)) = extract_preauth_user_and_ip(line) {
+        return Some(SshFailureEvent {
+            ip,
+            reason: SshFailureReason::PreauthConnectionClosed,
+            username: Some(username),
         });
     }
 
@@ -1145,6 +1180,58 @@ fn extract_ip_after_from(line: &str) -> Option<IpAddr> {
 fn extract_ip_after_key(line: &str, key: &str) -> Option<IpAddr> {
     let start = line.find(key)? + key.len();
     extract_ip_token(&line[start..])
+}
+
+fn extract_username_after_failed_password(line: &str) -> Option<String> {
+    extract_token_between(line, " for invalid user ", " from ")
+        .or_else(|| extract_token_between(line, " for ", " from "))
+}
+
+fn extract_username_after_invalid_user(line: &str) -> Option<String> {
+    extract_token_between(line, "Invalid user ", " from ")
+}
+
+fn extract_username_after_generic_for(line: &str) -> Option<String> {
+    extract_token_between(line, " for ", " from ")
+}
+
+fn extract_preauth_user_and_ip(line: &str) -> Option<(String, IpAddr)> {
+    const PREAUTH_SUFFIX: &str = " [preauth]";
+    let prefix = if line.contains("Connection closed by authenticating user ") {
+        "Connection closed by authenticating user "
+    } else if line.contains("Connection reset by authenticating user ") {
+        "Connection reset by authenticating user "
+    } else {
+        return None;
+    };
+
+    if !line.contains(PREAUTH_SUFFIX) {
+        return None;
+    }
+
+    let start = line.find(prefix)? + prefix.len();
+    let rest = &line[start..];
+    let end = rest.find(" port ")?;
+    let mut parts = rest[..end].split_whitespace();
+    let username = parts.next()?.trim();
+    let ip = parts.next()?.parse().ok()?;
+
+    (!username.is_empty()).then(|| (username.to_string(), ip))
+}
+
+fn extract_token_after_key(line: &str, key: &str) -> Option<String> {
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix(key))
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+}
+
+fn extract_token_between(line: &str, prefix: &str, suffix: &str) -> Option<String> {
+    let start = line.find(prefix)? + prefix.len();
+    let rest = &line[start..];
+    let end = rest.find(suffix)?;
+    let token = rest[..end].trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 fn extract_ip_token(input: &str) -> Option<IpAddr> {
@@ -1178,6 +1265,7 @@ mod tests {
         let event = parse_failure_event(line).unwrap();
         assert_eq!(event.ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)));
         assert_eq!(event.reason, SshFailureReason::FailedPassword);
+        assert_eq!(event.username.as_deref(), Some("admin"));
     }
 
     #[test]
@@ -1186,6 +1274,25 @@ mod tests {
         let event = parse_failure_event(line).unwrap();
         assert_eq!(event.ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)));
         assert_eq!(event.reason, SshFailureReason::PamAuthFailure);
+        assert_eq!(event.username.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn parses_preauth_connection_closed_line_from_auth_log() {
+        let line = "2026-04-14T02:00:22.462580+08:00 host sshd[465140]: Connection closed by authenticating user root 180.76.76.76 port 53256 [preauth]";
+        let event = parse_failure_event(line).unwrap();
+        assert_eq!(event.ip, IpAddr::V4(Ipv4Addr::new(180, 76, 76, 76)));
+        assert_eq!(event.reason, SshFailureReason::PreauthConnectionClosed);
+        assert_eq!(event.username.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn parses_preauth_connection_reset_line_from_auth_log() {
+        let line = "2026-04-14T02:00:22.462580+08:00 host sshd[465140]: Connection reset by authenticating user root 8.8.8.8 port 53256 [preauth]";
+        let event = parse_failure_event(line).unwrap();
+        assert_eq!(event.ip, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+        assert_eq!(event.reason, SshFailureReason::PreauthConnectionClosed);
+        assert_eq!(event.username.as_deref(), Some("root"));
     }
 
     #[test]

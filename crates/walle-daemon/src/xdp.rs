@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracing::{debug, info};
 use walle_common::{
-    DEFAULT_MAP_PIN_PATH, MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG, MAP_NAME_DENY_V4,
-    MAP_NAME_DENY_V6, MAP_NAME_ICMP_RULES, MAP_NAME_STATS, XDP_PROGRAM_NAME,
+    DEFAULT_MAP_PIN_PATH, MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG,
+    MAP_NAME_CONTAIN_V4, MAP_NAME_CONTAIN_V6, MAP_NAME_DENY_V4, MAP_NAME_DENY_V6,
+    MAP_NAME_ICMP_RULES, MAP_NAME_STATS, TC_EGRESS_PROGRAM_NAME, TC_INGRESS_PROGRAM_NAME,
+    XDP_PROGRAM_NAME,
 };
 
 #[cfg(target_os = "linux")]
@@ -13,7 +15,7 @@ use std::fs;
 #[cfg(target_os = "linux")]
 use aya::{
     Ebpf, EbpfError, EbpfLoader,
-    programs::{ProgramError, Xdp, XdpFlags},
+    programs::{ProgramError, SchedClassifier, TcAttachType, Xdp, XdpFlags, tc},
 };
 
 pub struct XdpAttachment {
@@ -122,6 +124,7 @@ fn attach_linux(
         path: map_pin_path.clone(),
         source,
     })?;
+    reset_tc_programs(interface)?;
     reset_pinned_maps(&map_pin_path)?;
 
     let mut ebpf = EbpfLoader::new()
@@ -159,6 +162,9 @@ fn attach_linux(
             source,
         })?;
 
+    attach_tc_program(&mut ebpf, interface, object_path.as_path(), TC_INGRESS_PROGRAM_NAME, TcAttachType::Ingress)?;
+    attach_tc_program(&mut ebpf, interface, object_path.as_path(), TC_EGRESS_PROGRAM_NAME, TcAttachType::Egress)?;
+
     info!(
         component = "xdp",
         event = "attached",
@@ -185,6 +191,8 @@ fn reset_pinned_maps(map_pin_path: &Path) -> Result<(), XdpError> {
         MAP_NAME_ALLOW_V6,
         MAP_NAME_DENY_V4,
         MAP_NAME_DENY_V6,
+        MAP_NAME_CONTAIN_V4,
+        MAP_NAME_CONTAIN_V6,
         MAP_NAME_ICMP_RULES,
         MAP_NAME_STATS,
     ] {
@@ -209,6 +217,112 @@ fn reset_pinned_maps(map_pin_path: &Path) -> Result<(), XdpError> {
             }
         }
     }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn reset_tc_programs(interface: &str) -> Result<(), XdpError> {
+    for (program_name, attach_type) in managed_tc_programs() {
+        match tc::qdisc_detach_program(interface, attach_type, program_name) {
+            Ok(()) => {
+                info!(
+                    component = "xdp",
+                    event = "stale_tc_detached",
+                    interface,
+                    program = program_name,
+                    attach_type = tc_attach_type_name(attach_type),
+                    "detached stale tc classifier program before loading the new object"
+                );
+            }
+            Err(source)
+                if source.kind() == std::io::ErrorKind::NotFound
+                    || source.raw_os_error() == Some(libc::ENODEV) => {}
+            Err(source) => {
+                return Err(XdpError::TcQdiscDetach {
+                    interface: interface.to_string(),
+                    program: program_name,
+                    attach_type: tc_attach_type_name(attach_type),
+                    source,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+const fn managed_tc_programs() -> [(&'static str, TcAttachType); 2] {
+    [
+        (TC_INGRESS_PROGRAM_NAME, TcAttachType::Ingress),
+        (TC_EGRESS_PROGRAM_NAME, TcAttachType::Egress),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+const fn tc_attach_type_name(attach_type: TcAttachType) -> &'static str {
+    match attach_type {
+        TcAttachType::Ingress => "ingress",
+        TcAttachType::Egress => "egress",
+        TcAttachType::Custom(_) => "custom",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn attach_tc_program(
+    ebpf: &mut Ebpf,
+    interface: &str,
+    object_path: &Path,
+    program_name: &'static str,
+    attach_type: TcAttachType,
+) -> Result<(), XdpError> {
+    match tc::qdisc_add_clsact(interface) {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(source) => {
+            return Err(XdpError::TcQdiscAdd {
+                interface: interface.to_string(),
+                source,
+            });
+        }
+    }
+
+    let program = ebpf
+        .program_mut(program_name)
+        .ok_or_else(|| XdpError::MissingProgram {
+            program: program_name,
+            path: object_path.to_path_buf(),
+        })?;
+    let program: &mut SchedClassifier = program
+        .try_into()
+        .map_err(|source| XdpError::ProgramAccess {
+            program: program_name,
+            path: object_path.to_path_buf(),
+            source,
+        })?;
+
+    program.load().map_err(|source| XdpError::ProgramLoad {
+        program: program_name,
+        path: object_path.to_path_buf(),
+        source,
+    })?;
+    program
+        .attach(interface, attach_type)
+        .map_err(|source| XdpError::ProgramAttach {
+            program: program_name,
+            interface: interface.to_string(),
+            source,
+        })?;
+
+    info!(
+        component = "xdp",
+        event = "tc_attached",
+        interface,
+        program = program_name,
+        attach_type = tc_attach_type_name(attach_type),
+        "attached tc classifier program to interface"
+    );
 
     Ok(())
 }
@@ -257,6 +371,22 @@ pub enum XdpError {
         program: &'static str,
         interface: String,
         source: ProgramError,
+    },
+    #[cfg(target_os = "linux")]
+    #[error("failed to add clsact qdisc to interface '{interface}': {source}")]
+    TcQdiscAdd {
+        interface: String,
+        source: std::io::Error,
+    },
+    #[cfg(target_os = "linux")]
+    #[error(
+        "failed to detach stale tc program '{program}' ({attach_type}) from interface '{interface}': {source}"
+    )]
+    TcQdiscDetach {
+        interface: String,
+        program: &'static str,
+        attach_type: &'static str,
+        source: std::io::Error,
     },
     #[cfg(not(target_os = "linux"))]
     #[error("XDP attachment is only supported on Linux hosts")]

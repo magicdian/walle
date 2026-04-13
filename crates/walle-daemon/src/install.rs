@@ -314,7 +314,16 @@ fn default_config_template() -> &'static str {
         "[detectors.ssh.gp]\n",
         "enabled = false\n",
         "strategy = \"observe\"\n",
-        "trigger_mode = \"all\"\n",
+        "trigger_mode = \"decision_emitted\"\n",
+        "\n",
+        "[detectors.ssh.gp.sshjail]\n",
+        "protected_port = 22\n",
+        "listen_port = 0\n",
+        "max_sessions = 32\n",
+        "idle_timeout_secs = 600\n",
+        "max_session_duration_secs = 3600\n",
+        "audit_dir = \"/tmp/walle/gp/ssh\"\n",
+        "hostname_strategy = \"generated\"\n",
         "\n",
         "[policy.access]\n",
         "mode = \"blacklist_only\"\n",
@@ -417,7 +426,9 @@ mod tests {
         assert!(template.contains("[detectors.ssh.gp]"));
         assert!(template.contains("enabled = false"));
         assert!(template.contains("strategy = \"observe\""));
-        assert!(template.contains("trigger_mode = \"all\""));
+        assert!(template.contains("trigger_mode = \"decision_emitted\""));
+        assert!(template.contains("[detectors.ssh.gp.sshjail]"));
+        assert!(template.contains("listen_port = 0"));
     }
 
     fn temp_root(name: &str) -> PathBuf {

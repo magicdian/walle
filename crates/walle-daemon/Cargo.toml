@@ -9,8 +9,11 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
+rand.workspace = true
+russh.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 walle-common = { path = "../walle-common" }

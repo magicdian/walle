@@ -505,16 +505,25 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
         SshCommand::PolicyShow => {
             let config = load_default_config("walle ssh policy-show")?;
             println!(
-                "ssh policy: enabled={}, threshold={}, window_secs={}, ban_duration_secs={}, source_mode={:?}, log_paths={:?}, gp_enabled={}, gp_strategy={}, gp_trigger_mode={}",
+                "ssh policy: enabled={}, threshold={}, window_secs={}, ban_duration_secs={}, invalid_user_force_ban_enabled={}, source_mode={:?}, log_paths={:?}, gp_enabled={}, gp_strategy={}, gp_trigger_mode={}, sshjail_protected_port={}, sshjail_listen_port={}, sshjail_max_sessions={}, sshjail_idle_timeout_secs={}, sshjail_max_session_duration_secs={}, sshjail_audit_dir={}, sshjail_hostname_strategy={:?}, sshjail_fake_hostname={:?}",
                 config.ssh_policy().enabled,
                 config.ssh_policy().failure_threshold,
                 config.ssh_policy().window_secs,
                 config.ssh_policy().ban_duration_secs,
+                config.ssh_policy().invalid_user_force_ban_enabled,
                 config.ssh_policy().log_source_mode,
                 config.ssh_policy().log_file_paths,
                 config.ssh_policy().gp.enabled,
                 config.ssh_policy().gp.strategy.as_str(),
-                config.ssh_policy().gp.trigger_mode.as_str()
+                config.ssh_policy().gp.trigger_mode.as_str(),
+                config.ssh_policy().gp.sshjail.protected_port,
+                config.ssh_policy().gp.sshjail.listen_port,
+                config.ssh_policy().gp.sshjail.max_sessions,
+                config.ssh_policy().gp.sshjail.idle_timeout_secs,
+                config.ssh_policy().gp.sshjail.max_session_duration_secs,
+                config.ssh_policy().gp.sshjail.audit_dir,
+                config.ssh_policy().gp.sshjail.hostname_strategy,
+                config.ssh_policy().gp.sshjail.fake_hostname
             );
         }
         SshCommand::Sources => {

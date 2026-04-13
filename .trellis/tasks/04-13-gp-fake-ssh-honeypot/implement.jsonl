@@ -1,0 +1,12 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Structured sshjail and containment telemetry"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Cross-layer shared contracts and tests"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Containment state and runtime repository contract"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Typed fail-open behavior for redirect and sshjail"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Place new daemon modules by capability"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Detector to runtime to sshjail redirect boundaries"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "Containment redirect contract and architecture alignment"}
+{"file": "crates/walle-daemon/src/gp.rs", "reason": "Existing GP adapter and fail-open execution pattern"}
+{"file": "crates/walle-daemon/src/detector.rs", "reason": "SSH log parsing and failure classification patterns"}
+{"file": "crates/walle-daemon/src/runtime.rs", "reason": "Runtime repository split and state lifecycle patterns"}

@@ -8,6 +8,7 @@ pub mod xdp {
         ICMP_RULE_PAYLOAD_CAPACITY, IcmpMatchType, IcmpRule, PacketAction, RuntimeConfig,
     };
 
+    pub const IPPROTO_TCP: u8 = 6;
     pub const IPPROTO_ICMP: u8 = 1;
     pub const IPPROTO_ICMPV6: u8 = 58;
     pub const ICMPV4_ECHO_REPLY: u8 = 0;
@@ -31,6 +32,22 @@ pub mod xdp {
         is_blacklisted: bool,
     ) -> PacketAction {
         config.access_mode.decide(is_whitelisted, is_blacklisted)
+    }
+
+    #[must_use]
+    pub const fn evaluate_access_with_containment(
+        config: &RuntimeConfig,
+        is_whitelisted: bool,
+        is_blacklisted: bool,
+        is_contained: bool,
+        protocol: u8,
+        tcp_dest_port: u16,
+    ) -> PacketAction {
+        if is_contained && protocol == IPPROTO_TCP && tcp_dest_port == config.protected_ssh_port {
+            PacketAction::Allow
+        } else {
+            evaluate_access(config, is_whitelisted, is_blacklisted)
+        }
     }
 
     #[must_use]
@@ -172,8 +189,9 @@ pub const fn default_action(config: &RuntimeConfig) -> PacketAction {
 mod tests {
     use super::xdp::{
         ICMPV4_ECHO_REPLY, ICMPV4_ECHO_REQUEST, ICMPV6_ECHO_REPLY, ICMPV6_ECHO_REQUEST,
-        IPPROTO_ICMP, IPPROTO_ICMPV6, IcmpPacketKind, apply_icmp_policy, classify_icmp_packet,
-        echo_payload_span, evaluate_access, raw_bytes_rule_matches, raw_bytes_rule_matches_buffer,
+        IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, IcmpPacketKind, apply_icmp_policy,
+        classify_icmp_packet, echo_payload_span, evaluate_access, evaluate_access_with_containment,
+        raw_bytes_rule_matches, raw_bytes_rule_matches_buffer,
     };
     use walle_common::{
         AccessMode, ICMP_RULE_PAYLOAD_CAPACITY, IcmpMode, IcmpRule, PacketAction, RuntimeConfig,
@@ -181,13 +199,43 @@ mod tests {
 
     #[test]
     fn ebpf_helper_matches_whitelist_precedence() {
-        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, Default::default());
+        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, Default::default(), 22, 2222);
         assert_eq!(evaluate_access(&config, true, true), PacketAction::Allow);
     }
 
     #[test]
+    fn containment_overrides_deny_for_protected_ssh() {
+        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, Default::default(), 22, 2222);
+
+        assert_eq!(
+            evaluate_access_with_containment(&config, false, true, true, IPPROTO_TCP, 22),
+            PacketAction::Allow
+        );
+    }
+
+    #[test]
+    fn containment_does_not_override_deny_for_other_tcp_ports() {
+        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, Default::default(), 22, 2222);
+
+        assert_eq!(
+            evaluate_access_with_containment(&config, false, true, true, IPPROTO_TCP, 80),
+            PacketAction::Drop
+        );
+    }
+
+    #[test]
+    fn containment_does_not_override_deny_for_non_tcp_protocols() {
+        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, Default::default(), 22, 2222);
+
+        assert_eq!(
+            evaluate_access_with_containment(&config, false, true, true, IPPROTO_ICMP, 22),
+            PacketAction::Drop
+        );
+    }
+
+    #[test]
     fn disabled_icmp_policy_keeps_access_verdict() {
-        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::Disabled);
+        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::Disabled, 22, 2222);
 
         assert_eq!(
             apply_icmp_policy(
@@ -202,7 +250,7 @@ mod tests {
 
     #[test]
     fn drop_all_icmp_policy_drops_echo_requests() {
-        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::DropAll);
+        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::DropAll, 22, 2222);
 
         assert_eq!(
             apply_icmp_policy(
@@ -217,7 +265,7 @@ mod tests {
 
     #[test]
     fn drop_all_icmp_policy_keeps_echo_replies() {
-        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::DropAll);
+        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::DropAll, 22, 2222);
 
         assert_eq!(
             apply_icmp_policy(
@@ -232,7 +280,8 @@ mod tests {
 
     #[test]
     fn allow_rule_mode_drops_icmp_misses() {
-        let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::AllowRulesActive);
+        let config =
+            RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::AllowRulesActive, 22, 2222);
 
         assert_eq!(
             apply_icmp_policy(

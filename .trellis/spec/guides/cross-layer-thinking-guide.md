@@ -77,11 +77,13 @@ Before implementation:
 - [ ] Identified all layer boundaries
 - [ ] Defined format at each boundary
 - [ ] Decided where validation happens
+- [ ] If packet handling spans multiple hook points such as XDP and tc, verified the execution order and ensured earlier hooks do not block later redirect/translation steps
 
 After implementation:
 - [ ] Tested with edge cases (null, empty, invalid)
 - [ ] Verified error handling at each boundary
 - [ ] Checked data survives round-trip
+- [ ] For mixed enforcement states like deny + contain, verified precedence with tests in the earliest hook that can short-circuit traffic
 
 ---
 
