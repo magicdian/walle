@@ -1,0 +1,4 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": "README.md", "reason": "review operator install docs for consistency with implementation"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "review written strategy against architecture portability contract"}

@@ -380,3 +380,76 @@ Current scaffold examples:
 
 * Treat ICMP mode as a typed runtime contract: drop ingress echo requests, preserve ingress echo replies, and keep verifier-safe attachability as part of the feature definition.
 * Represent exact-match ICMP rules as canonical `IcmpRule` hash keys so the dataplane performs one bounded payload copy and one hash lookup per packet.
+
+## Scenario: Manual Ban Lifecycle And Live Runtime Command Contract
+
+### 1. Scope / Trigger
+
+* Trigger: Any change to `walle ban add`, `walle ban remove`, `walle ban list`, runtime deny-entry mutation, or ban expiry coordination between CLI and pinned-map backends.
+
+### 2. Signatures
+
+* `walle ban add <ip> [duration_secs]`
+* `walle ban remove <ip>`
+* `walle ban list`
+* `WalleDaemon::add_manual_ban(IpAddr, Option<u64>) -> Result<(), DaemonError>`
+* `WalleDaemon::remove_ban(IpAddr) -> Result<usize, DaemonError>`
+* `WalleDaemon::list_bans() -> Result<BanStatusSnapshot, DaemonError>`
+* `RuntimeController::add_manual_ban(IpAddr, u64, Option<u64>) -> Result<(), RuntimeError>`
+* `RuntimeController::remove_ban(IpAddr) -> Result<bool, RuntimeError>`
+* `RuntimeController::list_bans() -> Result<Vec<BanRecord>, RuntimeError>`
+
+### 3. Contracts
+
+* Manual bans are live-runtime operations; they must mutate active pinned-map or connected runtime backends rather than editing `config.toml`.
+* `walle ban add <ip>` with no duration writes an indefinite manual ban:
+  * `source = Manual`
+  * `reason = Manual`
+  * `expires_at_ns = 0`
+* `walle ban add <ip> <duration_secs>` writes a temporary manual ban whose expiry is derived from `created_at_secs + duration_secs`.
+* `walle ban remove <ip>` removes the deny entry from every active runtime backend and reports how many interfaces were updated.
+* `walle ban list` must return one per-interface runtime snapshot with:
+  * interface name
+  * runtime backend kind
+  * ordered ban records
+* CLI ban commands must first connect to existing live runtime backends; they must not silently fall back to transient in-memory state.
+* Before manual mutation or listing, runtime code should run expiry cleanup so stale temporary bans do not remain visible.
+
+### 4. Validation & Error Matrix
+
+* valid live runtime + `walle ban add 198.51.100.10` -> manual indefinite deny entry is written to every connected interface backend.
+* valid live runtime + `walle ban add 198.51.100.10 30` -> temporary manual deny entry is written with `expires_at_ns > 0`.
+* valid live runtime + `walle ban remove 198.51.100.10` -> CLI succeeds and reports the number of interfaces where the ban existed.
+* valid live runtime + expired temporary bans present -> cleanup removes them before `walle ban list` output is rendered.
+* no active pinned runtime backend -> `DaemonError::NoActiveRuntime`.
+* live map open or delete failure during remove/list -> typed `RuntimeError` from the repository boundary.
+
+### 5. Good/Base/Bad Cases
+
+* Good:
+  * `walle run` is active on two interfaces, and `walle ban add 203.0.113.9 60` produces one deny entry in each interface runtime.
+  * `walle ban list` shows manual and detector bans with their source/reason metadata and expiry timestamps.
+  * `walle ban remove 203.0.113.9` returns a non-zero interface update count after removing the active ban.
+* Base:
+  * a live runtime with zero bans returns an empty list successfully.
+  * an indefinite manual ban survives expiry cleanup because `expires_at_ns = 0`.
+* Bad:
+  * mutating only the in-process default `InMemoryMapRepository` when no live runtime exists and presenting the result as a successful operator action.
+  * forgetting expiry cleanup before listing and showing stale temporary bans as still active.
+
+### 6. Tests Required
+
+* runtime tests must assert manual ban creation preserves `Manual` source/reason metadata and the expected expiry semantics.
+* runtime tests must assert manual ban removal updates snapshots and clears listed entries.
+* daemon / CLI-path tests or review must assert commands fail when no live runtime backend is available.
+* repository tests must keep IPv4 / IPv6 deny state separated while listing and removing entries.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+* Let `walle ban add` mutate an isolated in-memory repository when no pinned maps are active, creating a false sense that the host is protected.
+
+#### Correct
+
+* Treat ban commands as live-runtime operations: connect to active backends first, fail explicitly when they do not exist, and keep manual ban metadata aligned with the shared deny-entry contract.

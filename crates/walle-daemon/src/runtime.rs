@@ -33,6 +33,12 @@ pub struct RuntimeController {
     repository: RuntimeRepository,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BanRecord {
+    pub ip: IpAddr,
+    pub entry: BanEntryV4,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BanExpirySummary {
     pub removed_v4: usize,
@@ -93,6 +99,11 @@ impl RuntimeController {
         Ok(())
     }
 
+    #[must_use]
+    pub fn backend_kind(&self) -> RuntimeBackendKind {
+        self.repository.kind()
+    }
+
     pub fn sync_policy_for_interface(
         &mut self,
         config: &WalleConfig,
@@ -127,6 +138,32 @@ impl RuntimeController {
         Ok(())
     }
 
+    pub fn add_manual_ban(
+        &mut self,
+        ip: IpAddr,
+        created_at_secs: u64,
+        duration_secs: Option<u64>,
+    ) -> Result<(), RuntimeError> {
+        let entry = manual_ban_entry(created_at_secs, duration_secs);
+
+        match ip {
+            IpAddr::V4(ip) => self.repository.upsert_deny_v4(ip, entry)?,
+            IpAddr::V6(ip) => self.repository.upsert_deny_v6(ip, entry)?,
+        }
+
+        info!(
+            component = "runtime",
+            event = "manual_ban_applied",
+            ip = %ip,
+            created_at = %format_unix_timestamp_secs(created_at_secs),
+            expires_at = %format_optional_unix_timestamp_secs(ban_entry_expires_at_secs(entry)),
+            backend = self.repository.name(),
+            "applied manual ban to runtime repository"
+        );
+
+        Ok(())
+    }
+
     pub fn apply_ssh_ban(
         &mut self,
         decision: crate::detector::SshBanDecision,
@@ -152,6 +189,33 @@ impl RuntimeController {
         Ok(())
     }
 
+    pub fn remove_ban(&mut self, ip: IpAddr) -> Result<bool, RuntimeError> {
+        let removed = match ip {
+            IpAddr::V4(ip) => self.repository.remove_deny_v4(ip)?,
+            IpAddr::V6(ip) => self.repository.remove_deny_v6(ip)?,
+        };
+
+        if removed {
+            info!(
+                component = "runtime",
+                event = "ban_removed",
+                ip = %ip,
+                backend = self.repository.name(),
+                "removed runtime ban entry"
+            );
+        } else {
+            debug!(
+                component = "runtime",
+                event = "ban_remove_noop",
+                ip = %ip,
+                backend = self.repository.name(),
+                "runtime ban entry was already absent"
+            );
+        }
+
+        Ok(removed)
+    }
+
     pub fn expire_bans(&mut self, observed_at_secs: u64) -> Result<BanExpirySummary, RuntimeError> {
         let summary = self.repository.expire_bans(observed_at_secs)?;
 
@@ -168,6 +232,10 @@ impl RuntimeController {
         }
 
         Ok(summary)
+    }
+
+    pub fn list_bans(&self) -> Result<Vec<BanRecord>, RuntimeError> {
+        self.repository.list_bans()
     }
 
     #[must_use]
@@ -331,11 +399,35 @@ impl RuntimeRepository {
         }
     }
 
+    fn remove_deny_v4(&mut self, ip: Ipv4Addr) -> Result<bool, RuntimeError> {
+        match self {
+            Self::InMemory(repository) => Ok(repository.remove_deny_v4(ip)),
+            #[cfg(target_os = "linux")]
+            Self::Linux(repository) => repository.remove_deny_v4(ip),
+        }
+    }
+
+    fn remove_deny_v6(&mut self, ip: Ipv6Addr) -> Result<bool, RuntimeError> {
+        match self {
+            Self::InMemory(repository) => Ok(repository.remove_deny_v6(ip)),
+            #[cfg(target_os = "linux")]
+            Self::Linux(repository) => repository.remove_deny_v6(ip),
+        }
+    }
+
     fn expire_bans(&mut self, observed_at_secs: u64) -> Result<BanExpirySummary, RuntimeError> {
         match self {
             Self::InMemory(repository) => Ok(repository.expire_bans(observed_at_secs)),
             #[cfg(target_os = "linux")]
             Self::Linux(repository) => repository.expire_bans(observed_at_secs),
+        }
+    }
+
+    fn list_bans(&self) -> Result<Vec<BanRecord>, RuntimeError> {
+        match self {
+            Self::InMemory(repository) => Ok(repository.list_bans()),
+            #[cfg(target_os = "linux")]
+            Self::Linux(repository) => repository.list_bans(),
         }
     }
 }
@@ -395,6 +487,14 @@ impl InMemoryMapRepository {
         self.deny_v6.insert(ip, entry);
     }
 
+    pub fn remove_deny_v4(&mut self, ip: Ipv4Addr) -> bool {
+        self.deny_v4.remove(&ip).is_some()
+    }
+
+    pub fn remove_deny_v6(&mut self, ip: Ipv6Addr) -> bool {
+        self.deny_v6.remove(&ip).is_some()
+    }
+
     pub fn replace_icmp_rules(&mut self, rules: &[IcmpRule]) {
         self.icmp_rules.clear();
         self.icmp_rules.extend(rules.iter().copied());
@@ -419,6 +519,24 @@ impl InMemoryMapRepository {
             icmp_rule_entries: self.icmp_rules.len(),
             stats: StatsCounters::default(),
         }
+    }
+
+    #[must_use]
+    pub fn list_bans(&self) -> Vec<BanRecord> {
+        let mut records = self
+            .deny_v4
+            .iter()
+            .map(|(ip, entry)| BanRecord {
+                ip: IpAddr::V4(*ip),
+                entry: *entry,
+            })
+            .chain(self.deny_v6.iter().map(|(ip, entry)| BanRecord {
+                ip: IpAddr::V6(*ip),
+                entry: *entry,
+            }))
+            .collect::<Vec<_>>();
+        sort_ban_records(&mut records);
+        records
     }
 }
 
@@ -562,6 +680,22 @@ impl LinuxMapRepository {
             })
     }
 
+    fn remove_deny_v4(&mut self, ip: Ipv4Addr) -> Result<bool, RuntimeError> {
+        remove_pinned_ban(
+            Self::open_deny_v4_map(&self.map_pin_path)?,
+            MAP_NAME_DENY_V4,
+            Ipv4AddrKey::new(ip.octets()),
+        )
+    }
+
+    fn remove_deny_v6(&mut self, ip: Ipv6Addr) -> Result<bool, RuntimeError> {
+        remove_pinned_ban(
+            Self::open_deny_v6_map(&self.map_pin_path)?,
+            MAP_NAME_DENY_V6,
+            Ipv6AddrKey::new(ip.octets()),
+        )
+    }
+
     fn snapshot(&self) -> Result<RepositorySnapshot, RuntimeError> {
         let config = Self::open_config_map(&self.map_pin_path)?
             .get(&CONFIG_MAP_KEY, 0)
@@ -622,6 +756,21 @@ impl LinuxMapRepository {
                 observed_at_secs,
             )?,
         })
+    }
+
+    fn list_bans(&self) -> Result<Vec<BanRecord>, RuntimeError> {
+        let mut records = collect_pinned_bans(
+            Self::open_deny_v4_map(&self.map_pin_path)?,
+            MAP_NAME_DENY_V4,
+            |key| IpAddr::V4(Ipv4Addr::from(key.octets)),
+        )?;
+        records.extend(collect_pinned_bans(
+            Self::open_deny_v6_map(&self.map_pin_path)?,
+            MAP_NAME_DENY_V6,
+            |key| IpAddr::V6(Ipv6Addr::from(key.octets)),
+        )?);
+        sort_ban_records(&mut records);
+        Ok(records)
     }
 
     fn open_map(path: &Path, name: &'static str) -> Result<MapData, RuntimeError> {
@@ -780,9 +929,36 @@ where
     removed
 }
 
+fn sort_ban_records(records: &mut [BanRecord]) {
+    records.sort_by(|left, right| left.ip.to_string().cmp(&right.ip.to_string()));
+}
+
 fn is_expired_ban(entry: &BanEntryV4, observed_at_secs: u64) -> bool {
     let observed_at_ns = observed_at_secs.saturating_mul(1_000_000_000);
     entry.expires_at_ns != 0 && entry.expires_at_ns <= observed_at_ns
+}
+
+fn manual_ban_entry(created_at_secs: u64, duration_secs: Option<u64>) -> BanEntryV4 {
+    let created_at_ns = created_at_secs.saturating_mul(1_000_000_000);
+    let expires_at_ns = duration_secs
+        .map(|duration| created_at_secs.saturating_add(duration).saturating_mul(1_000_000_000))
+        .unwrap_or(0);
+
+    BanEntryV4 {
+        created_at_ns,
+        expires_at_ns,
+        ..BanEntryV4::manual_indefinite(created_at_ns)
+    }
+}
+
+fn ban_entry_expires_at_secs(entry: BanEntryV4) -> Option<u64> {
+    (entry.expires_at_ns != 0).then_some(entry.expires_at_ns / 1_000_000_000)
+}
+
+fn format_optional_unix_timestamp_secs(timestamp_secs: Option<u64>) -> String {
+    timestamp_secs
+        .map(format_unix_timestamp_secs)
+        .unwrap_or_else(|| "never".to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -828,6 +1004,75 @@ where
     Ok(removed)
 }
 
+#[cfg(target_os = "linux")]
+fn remove_pinned_ban<K>(
+    mut map: BpfHashMap<MapData, K, BanEntryV4>,
+    name: &'static str,
+    key: K,
+) -> Result<bool, RuntimeError>
+where
+    K: Copy + Pod + PartialEq,
+{
+    let keys = map
+        .keys()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| RuntimeError::MapOperation {
+            map: name,
+            operation: "collect_remove_keys",
+            source,
+        })?;
+
+    if !keys.contains(&key) {
+        return Ok(false);
+    }
+
+    map.remove(&key)
+        .map_err(|source| RuntimeError::MapOperation {
+            map: name,
+            operation: "remove_deny_entry",
+            source,
+        })?;
+
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn collect_pinned_bans<K, F>(
+    map: BpfHashMap<MapData, K, BanEntryV4>,
+    name: &'static str,
+    to_ip: F,
+) -> Result<Vec<BanRecord>, RuntimeError>
+where
+    K: Copy + Pod,
+    F: Fn(K) -> IpAddr,
+{
+    let keys = map
+        .keys()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| RuntimeError::MapOperation {
+            map: name,
+            operation: "collect_list_keys",
+            source,
+        })?;
+
+    let mut records = Vec::with_capacity(keys.len());
+    for key in keys {
+        let entry = map
+            .get(&key, 0)
+            .map_err(|source| RuntimeError::MapOperation {
+                map: name,
+                operation: "get_list_entry",
+                source,
+            })?;
+        records.push(BanRecord {
+            ip: to_ip(key),
+            entry,
+        });
+    }
+
+    Ok(records)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnvironmentCheck {
     pub name: &'static str,
@@ -854,6 +1099,15 @@ impl EnvironmentReport {
         self.checks
             .iter()
             .all(|check| check.status != CheckStatus::Fail)
+    }
+
+    #[must_use]
+    pub fn failure_details(&self) -> Vec<String> {
+        self.checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Fail)
+            .map(|check| format!("{}: {}", check.name, check.detail))
+            .collect()
     }
 }
 
@@ -935,6 +1189,7 @@ fn linux_environment_report(interface: Option<&str>) -> EnvironmentReport {
         "bpffs mount point is available",
         "bpffs mount point is missing",
     ));
+    checks.push(privilege_check());
     checks.push(path_check(
         "btf",
         "/sys/kernel/btf/vmlinux",
@@ -971,6 +1226,26 @@ fn path_check(name: &'static str, path: &str, pass: &str, fail: &str) -> Environ
             name,
             status: CheckStatus::Fail,
             detail: fail.to_string(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn privilege_check() -> EnvironmentCheck {
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        EnvironmentCheck {
+            name: "privileges",
+            status: CheckStatus::Pass,
+            detail: "running with root privileges".to_string(),
+        }
+    } else {
+        EnvironmentCheck {
+            name: "privileges",
+            status: CheckStatus::Fail,
+            detail: format!(
+                "effective uid {euid} does not have the required privileges; rerun as root to attach XDP and manage pinned maps"
+            ),
         }
     }
 }
@@ -1053,10 +1328,10 @@ pub enum RuntimeError {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    use walle_common::{AccessMode, BanEntryV4, IcmpMode};
+    use walle_common::{AccessMode, BanEntryV4, BanReasonCode, BanSource, IcmpMode};
     use walle_policy::{IcmpAllowRule, WalleConfig};
 
-    use super::{InMemoryMapRepository, RuntimeController};
+    use super::{InMemoryMapRepository, RuntimeController, manual_ban_entry};
 
     #[cfg(target_os = "linux")]
     use super::{KernelVersion, parse_kernel_release};
@@ -1156,5 +1431,37 @@ mod tests {
 
         assert_eq!(summary.removed_v4, 1);
         assert_eq!(controller.snapshot().deny_v4_entries, 0);
+    }
+
+    #[test]
+    fn runtime_controller_manual_ban_lists_and_unbans_entries() {
+        let mut controller = RuntimeController::new(Some("eth0".to_string()));
+        controller
+            .add_manual_ban(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)), 10, Some(30))
+            .unwrap();
+
+        let listed = controller.list_bans().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)));
+        assert_eq!(listed[0].entry.source, BanSource::Manual);
+        assert_eq!(listed[0].entry.reason, BanReasonCode::Manual);
+        assert_eq!(listed[0].entry.created_at_ns, 10_000_000_000);
+        assert_eq!(listed[0].entry.expires_at_ns, 40_000_000_000);
+
+        assert!(controller
+            .remove_ban(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)))
+            .unwrap());
+        assert!(controller.list_bans().unwrap().is_empty());
+    }
+
+    #[test]
+    fn manual_ban_helper_supports_indefinite_and_temporary_entries() {
+        let temporary = manual_ban_entry(5, Some(20));
+        assert_eq!(temporary.created_at_ns, 5_000_000_000);
+        assert_eq!(temporary.expires_at_ns, 25_000_000_000);
+
+        let indefinite = manual_ban_entry(5, None);
+        assert_eq!(indefinite.created_at_ns, 5_000_000_000);
+        assert_eq!(indefinite.expires_at_ns, 0);
     }
 }

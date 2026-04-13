@@ -22,6 +22,12 @@ pub enum DaemonError {
     Xdp(#[from] XdpError),
     #[error("requested interface '{interface}' is not declared in the loaded config")]
     InterfaceNotConfigured { interface: String },
+    #[error("environment compatibility checks failed: {details}")]
+    EnvironmentIncompatible { details: String },
+    #[error(
+        "no active runtime backends were found for {action}; start `walle run` or install the service first"
+    )]
+    NoActiveRuntime { action: &'static str },
 }
 
 #[derive(Debug, Error)]

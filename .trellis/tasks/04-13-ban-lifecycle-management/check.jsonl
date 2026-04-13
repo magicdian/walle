@@ -1,0 +1,5 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "review stable fields for lifecycle events"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "review typed user-facing failures for ban commands"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "review map contract, IPv4/IPv6 separation, and deny entry semantics"}

@@ -1,0 +1,8 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "typed install/uninstall and startup compatibility failures"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "service stack responsibilities and BTF/startup checks"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "service startup and environment diagnostics"}
+{"file": "crates/walle-daemon/src/xdp.rs", "reason": "default object path and pinned-map install layout"}
+{"file": "crates/walle-daemon/src/lib.rs", "reason": "daemon startup lifecycle and service orchestration"}
+{"file": "crates/walle-cli/src/main.rs", "reason": "CLI install/uninstall command integration"}

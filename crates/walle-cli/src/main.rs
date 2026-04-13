@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use walle_common::{AccessMode, IcmpMode};
+use walle_daemon::install::{InstallOptions, uninstall, UninstallOptions};
 use walle_daemon::logging::{format_unix_timestamp_secs, init_tracing};
 use walle_daemon::{DaemonOptions, WalleDaemon};
 use walle_policy::{IcmpAllowRule, LogLevel, WalleConfig};
@@ -19,6 +20,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Install(InstallArgs),
+    Uninstall(UninstallArgs),
     Run(RunArgs),
     Reload,
     Status,
@@ -42,6 +45,20 @@ struct RunArgs {
     ssh_poll_interval_ms: u64,
     #[arg(long)]
     ssh_follow_iterations: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+struct InstallArgs {
+    #[arg(long)]
+    root: Option<PathBuf>,
+    #[arg(long)]
+    xdp_object: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct UninstallArgs {
+    #[arg(long)]
+    root: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -191,6 +208,8 @@ fn run() -> Result<()> {
     init_tracing(configured_log_level(&cli.command));
 
     match cli.command {
+        Command::Install(args) => install_command(args),
+        Command::Uninstall(args) => uninstall_command(args),
         Command::Run(args) => run_command(args),
         Command::Reload => reload_command(),
         Command::Status => show_status(),
@@ -205,12 +224,51 @@ fn run() -> Result<()> {
 
 fn configured_log_level(command: &Command) -> LogLevel {
     match command {
+        Command::Install(_) | Command::Uninstall(_) => LogLevel::Info,
         Command::Reload => LogLevel::Info,
         Command::Ban(_) | Command::Allow(_) | Command::Icmp(_) => LogLevel::Info,
         _ => WalleConfig::load_default()
             .map(|config| config.logging_policy().level)
             .unwrap_or(LogLevel::Info),
     }
+}
+
+fn install_command(args: InstallArgs) -> Result<()> {
+    let report = walle_daemon::install::install(InstallOptions {
+        root: args.root.unwrap_or_else(|| PathBuf::from("/")),
+        xdp_object: args.xdp_object,
+        service_manager: None,
+    })?;
+
+    println!("binary_path: {}", report.binary_path.display());
+    println!("xdp_object_path: {}", report.object_path.display());
+    println!("config_path: {}", report.config_path.display());
+    println!("config_created: {}", report.config_created);
+    println!("service_manager: {}", report.service_manager.as_str());
+    println!("service_path: {}", report.service_path.display());
+    println!(
+        "next_step: review {} and start the service or fallback runner",
+        walle_policy::DEFAULT_CONFIG_PATH
+    );
+
+    Ok(())
+}
+
+fn uninstall_command(args: UninstallArgs) -> Result<()> {
+    let report = uninstall(UninstallOptions {
+        root: args.root.unwrap_or_else(|| PathBuf::from("/")),
+    })?;
+
+    println!("removed_paths: {}", report.removed_paths.len());
+    for path in report.removed_paths {
+        println!("removed: {}", path.display());
+    }
+    println!(
+        "preserved_config_path: {}",
+        report.preserved_config_path.display()
+    );
+
+    Ok(())
 }
 
 fn run_command(args: RunArgs) -> Result<()> {
@@ -366,18 +424,56 @@ fn handle_access_mode(command: AccessModeCommand) -> Result<()> {
 fn handle_ban(command: BanCommand) -> Result<()> {
     match command {
         BanCommand::Add { ip, duration_secs } => {
+            let mut daemon = WalleDaemon::new(
+                load_default_config("walle ban add")?,
+                DaemonOptions::default(),
+            )?;
+            daemon.add_manual_ban(ip, duration_secs)?;
             println!(
-                "planned denylist add: ip={ip}, duration_secs={}",
+                "ban added: ip={ip}, duration_secs={}",
                 duration_secs
                     .map(|value| value.to_string())
-                    .unwrap_or_else(|| "default".to_string())
+                    .unwrap_or_else(|| "never".to_string())
             );
         }
         BanCommand::Remove { ip } => {
-            println!("planned denylist removal: ip={ip}");
+            let mut daemon = WalleDaemon::new(
+                load_default_config("walle ban remove")?,
+                DaemonOptions::default(),
+            )?;
+            let removed_interfaces = daemon.remove_ban(ip)?;
+            println!("ban removed: ip={ip}, interfaces_updated={removed_interfaces}");
         }
         BanCommand::List => {
-            println!("planned denylist listing");
+            let mut daemon = WalleDaemon::new(
+                load_default_config("walle ban list")?,
+                DaemonOptions::default(),
+            )?;
+            let snapshot = daemon.list_bans()?;
+
+            println!("interfaces: {}", snapshot.interfaces.len());
+            println!("total_bans: {}", snapshot.total_bans);
+
+            for interface in snapshot.interfaces {
+                println!();
+                println!("[interface:{}]", interface.interface);
+                println!("backend: {}", interface.runtime_backend.as_str());
+                println!("bans: {}", interface.bans.len());
+
+                for ban in interface.bans {
+                    println!(
+                        "ban: ip={}, source={:?}, reason={:?}, created_at={}, expires_at={}",
+                        ban.ip,
+                        ban.entry.source,
+                        ban.entry.reason,
+                        format_unix_timestamp_secs(ban.entry.created_at_ns / 1_000_000_000),
+                        format_optional_unix_timestamp_secs(
+                            (ban.entry.expires_at_ns != 0)
+                                .then_some(ban.entry.expires_at_ns / 1_000_000_000)
+                        )
+                    );
+                }
+            }
         }
     }
 
@@ -515,6 +611,12 @@ fn print_ingest_summary(summary: &walle_daemon::detector::SshIngestSummary) {
             format_unix_timestamp_secs(ban.expires_at_secs)
         );
     }
+}
+
+fn format_optional_unix_timestamp_secs(timestamp_secs: Option<u64>) -> String {
+    timestamp_secs
+        .map(format_unix_timestamp_secs)
+        .unwrap_or_else(|| "never".to_string())
 }
 
 fn handle_icmp(command: IcmpCommand) -> Result<()> {

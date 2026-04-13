@@ -1,0 +1,5 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "review service lifecycle and environment logs"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "review install and startup failure messages"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "review install flow against intended deployment contract"}

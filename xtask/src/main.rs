@@ -1,4 +1,8 @@
-use std::{env, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use walle_common::{
@@ -18,6 +22,7 @@ fn run() -> Result<()> {
 
     match args.next().as_deref() {
         Some("build-ebpf") => build_ebpf(!args.any(|arg| arg == "--debug")),
+        Some("build-release") => build_release(),
         Some("verify-icmp-rule") => verify_icmp_rule(args.collect()),
         Some("emit-bpftool-config") => emit_bpftool_config(args.collect()),
         Some("emit-bpftool-icmp-rule") => emit_bpftool_icmp_rule(args.collect()),
@@ -63,6 +68,77 @@ fn build_ebpf(release: bool) -> Result<()> {
     }
 
     println!("built eBPF object: target/bpfel-unknown-none/{profile}/walle-ebpf");
+    Ok(())
+}
+
+fn build_release() -> Result<()> {
+    let root = workspace_root();
+    let version = workspace_version(&root)?;
+    let arch = release_arch(&root)?;
+    let artifact_basename = format!("walle-v{version}-linux-{arch}");
+    let release_bundle_dir = root.join("target/release-bundle");
+    let stage_root = release_bundle_dir.join(&artifact_basename);
+    let artifact_path = release_bundle_dir.join(format!("{artifact_basename}.tar.gz"));
+
+    reset_dir(&stage_root)?;
+    fs::create_dir_all(stage_root.join("bin"))
+        .with_context(|| format!("failed to create {}", stage_root.join("bin").display()))?;
+    fs::create_dir_all(stage_root.join("lib/walle"))
+        .with_context(|| format!("failed to create {}", stage_root.join("lib/walle").display()))?;
+    fs::create_dir_all(stage_root.join("share/doc/walle")).with_context(|| {
+        format!(
+            "failed to create {}",
+            stage_root.join("share/doc/walle").display()
+        )
+    })?;
+
+    run_command(
+        cargo_command(&root, &["build", "--release", "-p", "walle-cli"]),
+        "failed to build release walle binary",
+    )?;
+    build_ebpf(true)?;
+
+    copy_file(
+        &root.join("target/release/walle"),
+        &stage_root.join("bin/walle"),
+    )?;
+    copy_file(
+        &root.join("target/bpfel-unknown-none/release/walle-ebpf"),
+        &stage_root.join("lib/walle/walle-ebpf"),
+    )?;
+    copy_file(&root.join("README.md"), &stage_root.join("share/doc/walle/README.md"))?;
+    copy_file(
+        &root.join("LICENSE"),
+        &stage_root.join("share/doc/walle/LICENSE"),
+    )?;
+    copy_file(
+        &root.join("docs/operations/linux-install-and-distribution.md"),
+        &stage_root.join("share/doc/walle/linux-install-and-distribution.md"),
+    )?;
+
+    set_mode(&stage_root.join("bin/walle"), 0o755)?;
+    set_mode(&stage_root.join("lib/walle/walle-ebpf"), 0o644)?;
+    set_mode(&stage_root.join("share/doc/walle/README.md"), 0o644)?;
+    set_mode(&stage_root.join("share/doc/walle/LICENSE"), 0o644)?;
+    set_mode(
+        &stage_root.join("share/doc/walle/linux-install-and-distribution.md"),
+        0o644,
+    )?;
+
+    run_command(
+        {
+            let mut command = Command::new("tar");
+            command
+                .current_dir(&release_bundle_dir)
+                .arg("-czf")
+                .arg(&artifact_path)
+                .arg(&artifact_basename);
+            command
+        },
+        "failed to create release archive",
+    )?;
+
+    println!("{}", artifact_path.display());
     Ok(())
 }
 
@@ -259,6 +335,114 @@ fn default_icmp_rule_map_path() -> String {
     format!("{DEFAULT_MAP_PIN_PATH}/{MAP_NAME_ICMP_RULES}")
 }
 
+fn workspace_root() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir.parent().map(Path::to_path_buf).unwrap_or(manifest_dir)
+}
+
+fn workspace_version(root: &Path) -> Result<String> {
+    let manifest = fs::read_to_string(root.join("Cargo.toml"))
+        .with_context(|| format!("failed to read {}", root.join("Cargo.toml").display()))?;
+    let mut in_workspace_package = false;
+
+    for raw_line in manifest.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('[') {
+            in_workspace_package = line == "[workspace.package]";
+            continue;
+        }
+
+        if in_workspace_package {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if key.trim() == "version" {
+                return Ok(value.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+
+    bail!("failed to find workspace.package.version in Cargo.toml");
+}
+
+fn release_arch(root: &Path) -> Result<String> {
+    if let Ok(arch) = env::var("TARGET_ARCH") {
+        let trimmed = arch.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    let output = Command::new("uname")
+        .arg("-m")
+        .current_dir(root)
+        .output()
+        .context("failed to determine release architecture with `uname -m`")?;
+    if !output.status.success() {
+        bail!("`uname -m` failed while determining release architecture");
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn reset_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+    Ok(())
+}
+
+fn copy_file(source: &Path, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "failed to copy '{}' to '{}'",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)
+        .with_context(|| format!("failed to read metadata for {}", path.display()))?
+        .permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("failed to set mode on {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_mode(path: &Path, _mode: u32) -> Result<()> {
+    let _ = path;
+    Ok(())
+}
+
+fn cargo_command(root: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("cargo");
+    command.current_dir(root).args(args);
+    command
+}
+
+fn run_command(mut command: Command, failure_message: &str) -> Result<()> {
+    let status = command.status().with_context(|| failure_message.to_string())?;
+    if !status.success() {
+        bail!("{failure_message}");
+    }
+
+    Ok(())
+}
+
 fn serialize_runtime_config(config: RuntimeConfig) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(12);
     bytes.extend_from_slice(&config.version.to_ne_bytes());
@@ -313,6 +497,7 @@ fn hex_string(bytes: &[u8]) -> String {
 fn print_help() {
     println!("xtask commands:");
     println!("  build-ebpf [--debug]");
+    println!("  build-release");
     println!("  verify-icmp-rule <rule-payload-bytes> <icmp-payload-bytes>");
     println!("  emit-bpftool-config <access-mode> <icmp-mode> [map-path]");
     println!("  emit-bpftool-icmp-rule <payload-bytes> [map-path]");

@@ -1,0 +1,6 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "distribution baseline and BTF/CO-RE portability contract"}
+{"file": "README.md", "reason": "operator-facing install and artifact layout guidance"}
+{"file": "crates/walle-daemon/src/install.rs", "reason": "actual installed file layout and service manager behavior"}
+{"file": "crates/walle-daemon/src/runtime.rs", "reason": "environment compatibility checks and kernel baseline"}

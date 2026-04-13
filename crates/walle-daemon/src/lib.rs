@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod detector;
 pub mod error;
+pub mod install;
 pub mod logging;
 pub mod runtime;
 pub mod xdp;
@@ -21,7 +22,7 @@ use crate::detector::{
 pub use crate::error::{DaemonError, RuntimeLockError};
 use crate::logging::format_unix_timestamp_secs;
 use crate::runtime::{
-    EnvironmentReport, RuntimeBackendKind, RuntimeController, RuntimeSnapshot,
+    BanRecord, EnvironmentReport, RuntimeBackendKind, RuntimeController, RuntimeSnapshot,
     log_environment_report, verify_environment,
 };
 pub use crate::xdp::XdpError;
@@ -87,6 +88,19 @@ pub struct InterfaceStatusSnapshot {
     pub deny_v6_entries: usize,
     pub icmp_rule_entries: usize,
     pub stats: StatsCounters,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BanStatusSnapshot {
+    pub total_bans: usize,
+    pub interfaces: Vec<InterfaceBanSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterfaceBanSnapshot {
+    pub interface: String,
+    pub runtime_backend: RuntimeBackendKind,
+    pub bans: Vec<BanRecord>,
 }
 
 pub struct WalleDaemon {
@@ -164,6 +178,11 @@ impl WalleDaemon {
 
         let environment = self.verify_environment();
         log_environment_report(&environment);
+        if !environment.is_compatible() {
+            return Err(DaemonError::EnvironmentIncompatible {
+                details: environment.failure_details().join("; "),
+            });
+        }
 
         for runtime in &mut self.runtimes {
             runtime.xdp = Some(attach(
@@ -208,8 +227,15 @@ impl WalleDaemon {
         Ok(())
     }
 
-    pub fn connect_existing_runtime_backends(&mut self) -> Result<(), DaemonError> {
+    pub fn connect_existing_runtime_backends(&mut self) -> Result<usize, DaemonError> {
+        let mut connected = 0;
+
         for runtime in &mut self.runtimes {
+            if matches!(runtime.runtime.backend_kind(), RuntimeBackendKind::BpfMaps) {
+                connected += 1;
+                continue;
+            }
+
             let map_pin_path = map_pin_path_for_interface(
                 runtime.interface.name.as_str(),
                 self.options.map_pin_path.as_deref(),
@@ -220,9 +246,10 @@ impl WalleDaemon {
             }
 
             runtime.runtime.connect_map_backend(&map_pin_path)?;
+            connected += 1;
         }
 
-        Ok(())
+        Ok(connected)
     }
 
     pub fn run_ssh_follow_loop(&mut self) -> Result<(), DaemonError> {
@@ -439,6 +466,63 @@ impl WalleDaemon {
         Ok(summary)
     }
 
+    pub fn add_manual_ban(
+        &mut self,
+        ip: std::net::IpAddr,
+        duration_secs: Option<u64>,
+    ) -> Result<(), DaemonError> {
+        self.ensure_live_runtime_backends("walle ban add")?;
+
+        let observed_at_secs = unix_timestamp_secs();
+        for runtime in &mut self.runtimes {
+            runtime.runtime.expire_bans(observed_at_secs)?;
+            runtime
+                .runtime
+                .add_manual_ban(ip, observed_at_secs, duration_secs)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_ban(&mut self, ip: std::net::IpAddr) -> Result<usize, DaemonError> {
+        self.ensure_live_runtime_backends("walle ban remove")?;
+
+        let observed_at_secs = unix_timestamp_secs();
+        let mut removed = 0;
+        for runtime in &mut self.runtimes {
+            runtime.runtime.expire_bans(observed_at_secs)?;
+            if runtime.runtime.remove_ban(ip)? {
+                removed += 1;
+            }
+        }
+
+        Ok(removed)
+    }
+
+    pub fn list_bans(&mut self) -> Result<BanStatusSnapshot, DaemonError> {
+        self.ensure_live_runtime_backends("walle ban list")?;
+
+        let observed_at_secs = unix_timestamp_secs();
+        let mut total_bans = 0;
+        let mut interfaces = Vec::with_capacity(self.runtimes.len());
+
+        for runtime in &mut self.runtimes {
+            runtime.runtime.expire_bans(observed_at_secs)?;
+            let bans = runtime.runtime.list_bans()?;
+            total_bans += bans.len();
+            interfaces.push(InterfaceBanSnapshot {
+                interface: runtime.interface.name.clone(),
+                runtime_backend: runtime.runtime.backend_kind(),
+                bans,
+            });
+        }
+
+        Ok(BanStatusSnapshot {
+            total_bans,
+            interfaces,
+        })
+    }
+
     fn should_run_follow_loop(&self) -> bool {
         self.options.foreground && self.options.ssh_follow_iterations != Some(0)
     }
@@ -469,6 +553,14 @@ impl WalleDaemon {
     fn apply_ssh_ban_to_all(&mut self, decision: SshBanDecision) -> Result<(), DaemonError> {
         for runtime in &mut self.runtimes {
             runtime.runtime.apply_ssh_ban(decision.clone())?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_live_runtime_backends(&mut self, action: &'static str) -> Result<(), DaemonError> {
+        if self.connect_existing_runtime_backends()? == 0 {
+            return Err(DaemonError::NoActiveRuntime { action });
         }
 
         Ok(())

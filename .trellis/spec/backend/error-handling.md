@@ -130,3 +130,74 @@ Current scaffold examples:
 * [`walle-daemon error`](E:/coding/github_projects/walle/crates/walle-daemon/src/error.rs): daemon-owned typed error boundary
 * [`walle-cli main`](E:/coding/github_projects/walle/crates/walle-cli/src/main.rs): binary-boundary error rendering for the unified `walle` executable
 * [`walle-policy errors`](E:/coding/github_projects/walle/crates/walle-policy/src/lib.rs): validation-focused typed errors
+
+## Scenario: Linux Install, Startup Compatibility, And Release Bundle Errors
+
+### 1. Scope / Trigger
+
+* Trigger: Any change to `walle install`, `walle uninstall`, daemon startup compatibility checks, live-runtime availability checks, or `xtask build-release`.
+
+### 2. Signatures
+
+* `walle install [--root <path>] [--xdp-object <path>]`
+* `walle uninstall [--root <path>]`
+* `install::install(InstallOptions) -> Result<InstallReport, InstallError>`
+* `install::uninstall(UninstallOptions) -> Result<UninstallReport, InstallError>`
+* `WalleDaemon::startup() -> Result<(), DaemonError>`
+* `WalleDaemon::add_manual_ban(...) -> Result<(), DaemonError>`
+* `WalleDaemon::list_bans() -> Result<BanStatusSnapshot, DaemonError>`
+* `cargo run -p xtask -- build-release`
+
+### 3. Contracts
+
+* Install / uninstall failures must stay in the installer boundary as typed `InstallError` values until the CLI renders them.
+* Installing into `/` without root privileges must fail explicitly; do not attempt partial writes and do not silently downgrade the target path.
+* Missing eBPF release objects during install must mention the searched paths and the operator remediation path.
+* `WalleDaemon::startup()` must fail fast with `DaemonError::EnvironmentIncompatible` when compatibility checks contain any hard failures.
+* Ban commands that require active pinned maps must fail with `DaemonError::NoActiveRuntime` instead of pretending the action succeeded.
+* `xtask build-release` must fail if either:
+  * the release `walle` binary cannot be built
+  * the release `walle-ebpf` object cannot be built
+  * the release bundle archive cannot be created
+
+### 4. Validation & Error Matrix
+
+* non-Linux host install request -> `InstallError::UnsupportedHost`
+* install into `/` without root -> `InstallError::MissingPrivileges`
+* explicit `--xdp-object` path missing -> `InstallError::MissingXdpObject`
+* startup with missing bpffs / missing BTF / unsupported kernel / missing privileges -> `DaemonError::EnvironmentIncompatible`
+* `walle ban list` with no active runtime backend -> `DaemonError::NoActiveRuntime`
+* `xtask build-release` userspace build failure -> command exits non-zero with release-build context
+* `xtask build-release` eBPF build failure -> command exits non-zero with eBPF-build context
+* `xtask build-release` tar packaging failure -> command exits non-zero with archive-build context
+
+### 5. Good/Base/Bad Cases
+
+* Good:
+  * installing with a valid binary + eBPF object returns concrete output paths and selected service-manager mode.
+  * startup on an unsupported host fails before attempting XDP attach and prints actionable compatibility details.
+  * `cargo run -p xtask -- build-release` produces one bundle that always contains both `walle` and `walle-ebpf`.
+* Base:
+  * uninstall can succeed even when some managed files are already absent.
+  * a custom non-`/` install root is allowed without root checks so packaging tests can stage files in temp directories.
+* Bad:
+  * allowing install to partially copy files before returning a vague permission error.
+  * letting startup continue after a known compatibility failure and only surfacing the problem later in the attach path.
+  * publishing a release artifact that contains the userspace binary but omits the eBPF object.
+
+### 6. Tests Required
+
+* installer tests must assert systemd asset generation, config preservation, and uninstall cleanup behavior.
+* daemon tests or review must confirm startup returns a typed compatibility error before XDP attach on failed environment checks.
+* manual validation must cover `cargo run -p xtask -- build-release` and confirm the produced archive includes both `bin/walle` and `lib/walle/walle-ebpf`.
+* shell wrapper validation must keep `scripts/build_release.sh` as a thin pass-through to the `xtask` command.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+* Rely on README instructions alone and assume release engineering will remember to include the eBPF object next to the userspace binary.
+
+#### Correct
+
+* Encode release bundling and installer failure behavior as typed contracts: build both artifacts together, fail early on compatibility issues, and keep remediation guidance in the error text.
