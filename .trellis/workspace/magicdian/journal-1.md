@@ -60,3 +60,38 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Real XDP attach and live policy validation
+
+**Date**: 2026-04-13
+**Task**: Real XDP attach and live policy validation
+
+### Summary
+
+Committed real XDP attach/runtime backend work, archived the completed loader/map/SSH follow tasks, validated live SSH ban propagation and ICMP DropAll behavior on eth0, refined DropAll to drop ingress echo request while allowing echo reply, and documented that exact-match ICMP AllowRulesActive dataplane enforcement remains pending.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2ef58b9` | (see git log) |
+| `4ab649b` | (see git log) |
+| `387c096` | (see git log) |
+| `0a576cb` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 1
-- **Last Active**: 2026-04-12
+- **Total Sessions**: 2
+- **Last Active**: 2026-04-13
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~62 | Active |
+| `journal-1.md` | ~97 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits |
 |---|------|-------|---------|
+| 2 | 2026-04-13 | Real XDP attach and live policy validation | `2ef58b9`, `4ab649b`, `387c096`, `0a576cb` |
 | 1 | 2026-04-12 | Bootstrap architecture and SSH detector scaffold | `1f8f47e` |
 <!-- @@@/auto:session-history -->
 
