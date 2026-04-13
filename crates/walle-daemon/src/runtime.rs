@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -13,12 +13,13 @@ use std::str::FromStr;
 use thiserror::Error;
 use tracing::{debug, info};
 use walle_common::{
-    AccessMode, BanEntryV4, CONFIG_MAP_KEY, ICMP_RULE_MAP_CAPACITY, ICMP_RULE_PAYLOAD_CAPACITY,
-    IcmpMode, IcmpRule, Ipv4AddrKey, Ipv6AddrKey, MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6,
-    MAP_NAME_CONFIG, MAP_NAME_DENY_V4, MAP_NAME_DENY_V6, MAP_NAME_ICMP_RULES, MAP_NAME_STATS,
-    RuntimeConfig,
+    AccessMode, BanEntryV4, CONFIG_MAP_KEY, ICMP_RULE_MAP_CAPACITY, IcmpMode, IcmpRule,
+    Ipv4AddrKey, Ipv6AddrKey, MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG,
+    MAP_NAME_DENY_V4, MAP_NAME_DENY_V6, MAP_NAME_ICMP_RULES, MAP_NAME_STATS, RuntimeConfig,
 };
 use walle_policy::WalleConfig;
+
+use crate::logging::format_unix_timestamp_secs;
 
 #[cfg(target_os = "linux")]
 use aya::{
@@ -120,7 +121,8 @@ impl RuntimeController {
             component = "runtime",
             event = "ssh_ban_applied",
             ip = %decision.ip,
-            expires_at_secs = decision.expires_at_secs,
+            observed_at = %format_unix_timestamp_secs(decision.observed_at_secs),
+            expires_at = %format_unix_timestamp_secs(decision.expires_at_secs),
             matched_failures = decision.matched_failures,
             backend = self.repository.name(),
             "applied SSH detector ban to runtime repository"
@@ -136,7 +138,7 @@ impl RuntimeController {
             info!(
                 component = "runtime",
                 event = "ban_expiry_cleanup",
-                observed_at_secs,
+                observed_at = %format_unix_timestamp_secs(observed_at_secs),
                 removed_v4 = summary.removed_v4,
                 removed_v6 = summary.removed_v6,
                 backend = self.repository.name(),
@@ -314,7 +316,7 @@ pub struct InMemoryMapRepository {
     allow_v6: BTreeSet<Ipv6Addr>,
     deny_v4: HashMap<Ipv4Addr, BanEntryV4>,
     deny_v6: HashMap<Ipv6Addr, BanEntryV4>,
-    icmp_rules: Vec<IcmpRule>,
+    icmp_rules: HashSet<IcmpRule>,
 }
 
 impl InMemoryMapRepository {
@@ -364,7 +366,7 @@ impl InMemoryMapRepository {
 
     pub fn replace_icmp_rules(&mut self, rules: &[IcmpRule]) {
         self.icmp_rules.clear();
-        self.icmp_rules.extend_from_slice(rules);
+        self.icmp_rules.extend(rules.iter().copied());
     }
 
     #[must_use]
@@ -493,16 +495,13 @@ impl LinuxMapRepository {
         }
 
         let mut map = Self::open_icmp_rules_map(&self.map_pin_path)?;
+        clear_hash_map(&mut map, MAP_NAME_ICMP_RULES, "clear_icmp_rules")?;
 
-        for index in 0..ICMP_RULE_MAP_CAPACITY {
-            let rule = rules
-                .get(index as usize)
-                .copied()
-                .unwrap_or_else(disabled_icmp_rule);
-            map.set(index, rule, 0)
+        for rule in rules {
+            map.insert(*rule, 1, 0)
                 .map_err(|source| RuntimeError::MapOperation {
                     map: MAP_NAME_ICMP_RULES,
-                    operation: "set_icmp_rule",
+                    operation: "insert_icmp_rule",
                     source,
                 })?;
         }
@@ -554,8 +553,10 @@ impl LinuxMapRepository {
             Self::open_deny_v6_map(&self.map_pin_path)?,
             MAP_NAME_DENY_V6,
         )?;
-        let icmp_rule_entries =
-            count_enabled_rules(Self::open_icmp_rules_map(&self.map_pin_path)?)?;
+        let icmp_rule_entries = count_keys(
+            Self::open_icmp_rules_map(&self.map_pin_path)?,
+            MAP_NAME_ICMP_RULES,
+        )?;
 
         Ok(RepositorySnapshot {
             config,
@@ -649,25 +650,14 @@ impl LinuxMapRepository {
         )
     }
 
-    fn open_icmp_rules_map(path: &Path) -> Result<Array<MapData, IcmpRule>, RuntimeError> {
-        Array::try_from(Map::Array(Self::open_map(path, MAP_NAME_ICMP_RULES)?)).map_err(|source| {
-            RuntimeError::MapOpen {
+    fn open_icmp_rules_map(path: &Path) -> Result<BpfHashMap<MapData, IcmpRule, u8>, RuntimeError> {
+        BpfHashMap::try_from(Map::HashMap(Self::open_map(path, MAP_NAME_ICMP_RULES)?)).map_err(
+            |source| RuntimeError::MapOpen {
                 map: MAP_NAME_ICMP_RULES,
                 path: path.join(MAP_NAME_ICMP_RULES),
                 source,
-            }
-        })
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn disabled_icmp_rule() -> IcmpRule {
-    IcmpRule {
-        match_type: walle_common::IcmpMatchType::RawBytesExact,
-        payload_length: 0,
-        enabled: 0,
-        reserved: 0,
-        payload: [0; ICMP_RULE_PAYLOAD_CAPACITY],
+            },
+        )
     }
 }
 
@@ -719,27 +709,6 @@ where
             operation: "count_keys",
             source,
         })
-}
-
-#[cfg(target_os = "linux")]
-fn count_enabled_rules(map: Array<MapData, IcmpRule>) -> Result<usize, RuntimeError> {
-    let mut count = 0;
-
-    for index in 0..ICMP_RULE_MAP_CAPACITY {
-        let rule = map
-            .get(&index, 0)
-            .map_err(|source| RuntimeError::MapOperation {
-                map: MAP_NAME_ICMP_RULES,
-                operation: "get_icmp_rule",
-                source,
-            })?;
-
-        if rule.enabled != 0 {
-            count += 1;
-        }
-    }
-
-    Ok(count)
 }
 
 fn expire_ban_map<K>(map: &mut HashMap<K, BanEntryV4>, observed_at_secs: u64) -> usize

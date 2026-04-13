@@ -4,7 +4,9 @@ use walle_common::{PacketAction, RuntimeConfig};
 
 pub mod xdp {
     use core::ptr;
-    use walle_common::{IcmpMatchType, IcmpRule, PacketAction, RuntimeConfig, ICMP_RULE_PAYLOAD_CAPACITY};
+    use walle_common::{
+        ICMP_RULE_PAYLOAD_CAPACITY, IcmpMatchType, IcmpRule, PacketAction, RuntimeConfig,
+    };
 
     pub const IPPROTO_ICMP: u8 = 1;
     pub const IPPROTO_ICMPV6: u8 = 58;
@@ -12,6 +14,7 @@ pub mod xdp {
     pub const ICMPV4_ECHO_REQUEST: u8 = 8;
     pub const ICMPV6_ECHO_REQUEST: u8 = 128;
     pub const ICMPV6_ECHO_REPLY: u8 = 129;
+    pub const ICMP_ECHO_HEADER_LEN: usize = 8;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum IcmpPacketKind {
@@ -37,8 +40,7 @@ pub mod xdp {
         icmp_kind: IcmpPacketKind,
         rule_hit: bool,
     ) -> PacketAction {
-        if matches!(base_action, PacketAction::Drop)
-            || matches!(icmp_kind, IcmpPacketKind::NonIcmp)
+        if matches!(base_action, PacketAction::Drop) || matches!(icmp_kind, IcmpPacketKind::NonIcmp)
         {
             return base_action;
         }
@@ -82,6 +84,30 @@ pub mod xdp {
             },
             _ => IcmpPacketKind::NonIcmp,
         }
+    }
+
+    #[must_use]
+    pub const fn echo_payload_span(
+        icmp_kind: IcmpPacketKind,
+        icmp_length: usize,
+    ) -> Option<(usize, usize)> {
+        if !matches!(
+            icmp_kind,
+            IcmpPacketKind::EchoRequest | IcmpPacketKind::EchoReply
+        ) {
+            return None;
+        }
+
+        if icmp_length <= ICMP_ECHO_HEADER_LEN {
+            return None;
+        }
+
+        let payload_length = icmp_length - ICMP_ECHO_HEADER_LEN;
+        if payload_length > ICMP_RULE_PAYLOAD_CAPACITY {
+            return None;
+        }
+
+        Some((ICMP_ECHO_HEADER_LEN, payload_length))
     }
 
     #[must_use]
@@ -145,12 +171,12 @@ pub const fn default_action(config: &RuntimeConfig) -> PacketAction {
 #[cfg(test)]
 mod tests {
     use super::xdp::{
-        apply_icmp_policy, classify_icmp_packet, evaluate_access, raw_bytes_rule_matches,
-        raw_bytes_rule_matches_buffer, IcmpPacketKind, ICMPV4_ECHO_REPLY, ICMPV4_ECHO_REQUEST,
-        ICMPV6_ECHO_REPLY, ICMPV6_ECHO_REQUEST, IPPROTO_ICMP, IPPROTO_ICMPV6,
+        ICMPV4_ECHO_REPLY, ICMPV4_ECHO_REQUEST, ICMPV6_ECHO_REPLY, ICMPV6_ECHO_REQUEST,
+        IPPROTO_ICMP, IPPROTO_ICMPV6, IcmpPacketKind, apply_icmp_policy, classify_icmp_packet,
+        echo_payload_span, evaluate_access, raw_bytes_rule_matches, raw_bytes_rule_matches_buffer,
     };
     use walle_common::{
-        AccessMode, IcmpMode, IcmpRule, PacketAction, RuntimeConfig, ICMP_RULE_PAYLOAD_CAPACITY,
+        AccessMode, ICMP_RULE_PAYLOAD_CAPACITY, IcmpMode, IcmpRule, PacketAction, RuntimeConfig,
     };
 
     #[test]
@@ -164,7 +190,12 @@ mod tests {
         let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::Disabled);
 
         assert_eq!(
-            apply_icmp_policy(&config, PacketAction::Allow, IcmpPacketKind::EchoRequest, false),
+            apply_icmp_policy(
+                &config,
+                PacketAction::Allow,
+                IcmpPacketKind::EchoRequest,
+                false
+            ),
             PacketAction::Allow
         );
     }
@@ -174,7 +205,12 @@ mod tests {
         let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::DropAll);
 
         assert_eq!(
-            apply_icmp_policy(&config, PacketAction::Allow, IcmpPacketKind::EchoRequest, false),
+            apply_icmp_policy(
+                &config,
+                PacketAction::Allow,
+                IcmpPacketKind::EchoRequest,
+                false
+            ),
             PacketAction::Drop
         );
     }
@@ -184,7 +220,12 @@ mod tests {
         let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::DropAll);
 
         assert_eq!(
-            apply_icmp_policy(&config, PacketAction::Allow, IcmpPacketKind::EchoReply, false),
+            apply_icmp_policy(
+                &config,
+                PacketAction::Allow,
+                IcmpPacketKind::EchoReply,
+                false
+            ),
             PacketAction::Allow
         );
     }
@@ -194,7 +235,12 @@ mod tests {
         let config = RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::AllowRulesActive);
 
         assert_eq!(
-            apply_icmp_policy(&config, PacketAction::Allow, IcmpPacketKind::EchoRequest, false),
+            apply_icmp_policy(
+                &config,
+                PacketAction::Allow,
+                IcmpPacketKind::EchoRequest,
+                false
+            ),
             PacketAction::Drop
         );
     }
@@ -219,6 +265,18 @@ mod tests {
     }
 
     #[test]
+    fn stack_buffer_rule_match_rejects_lengths_beyond_capacity() {
+        let rule = IcmpRule::raw_bytes_exact(&[8, 0, 0, 0]).expect("rule should compile");
+        let payload = [0u8; ICMP_RULE_PAYLOAD_CAPACITY];
+
+        assert!(!raw_bytes_rule_matches_buffer(
+            &rule,
+            &payload,
+            ICMP_RULE_PAYLOAD_CAPACITY + 1
+        ));
+    }
+
+    #[test]
     fn classify_icmp_packet_distinguishes_request_and_reply() {
         assert_eq!(
             classify_icmp_packet(IPPROTO_ICMP, ICMPV4_ECHO_REQUEST),
@@ -236,5 +294,23 @@ mod tests {
             classify_icmp_packet(IPPROTO_ICMPV6, ICMPV6_ECHO_REPLY),
             IcmpPacketKind::EchoReply
         );
+    }
+
+    #[test]
+    fn echo_payload_span_skips_dynamic_echo_header() {
+        assert_eq!(
+            echo_payload_span(IcmpPacketKind::EchoRequest, 12),
+            Some((8, 4))
+        );
+        assert_eq!(
+            echo_payload_span(IcmpPacketKind::EchoReply, 16),
+            Some((8, 8))
+        );
+    }
+
+    #[test]
+    fn echo_payload_span_rejects_non_echo_or_empty_payloads() {
+        assert_eq!(echo_payload_span(IcmpPacketKind::Other, 12), None);
+        assert_eq!(echo_payload_span(IcmpPacketKind::EchoRequest, 8), None);
     }
 }

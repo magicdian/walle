@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use anyhow::Result;
-use tracing_subscriber::EnvFilter;
+use walle_daemon::logging::init_tracing;
 use walle_daemon::{DaemonOptions, WalleDaemon};
 use walle_policy::WalleConfig;
 
@@ -16,10 +16,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .without_time()
-        .init();
+    init_tracing();
 
     let mut daemon = WalleDaemon::new(
         WalleConfig::default(),

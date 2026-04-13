@@ -1,5 +1,10 @@
 {"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
 {"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
-{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "verify ICMP dataplane matches map and shared-type contracts"}
-{"file": "crates/walle-ebpf/src/main.rs", "reason": "review ICMP parsing, rule matching, and stats updates in dataplane"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "verify ICMP map contract and shared discriminants"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "verify human-auditable time output and stable fields"}
 {"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "verify bounded packet-path logic and required tests"}
+{"file": "crates/walle-daemon/src/runtime.rs", "reason": "review runtime log fields and cleanup semantics"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "review shared-type flow across daemon and XDP"}
+{"file": "crates/walle-ebpf/src/main.rs", "reason": "review ICMP parsing, exact match, and counters"}
+{"file": "crates/walle-daemon/src/lib.rs", "reason": "review follow-loop audit output"}
+{"file": "crates/walle-cli/src/main.rs", "reason": "review CLI timestamp formatting output"}

@@ -1,7 +1,16 @@
 {"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
 {"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
-{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "BPF map repository and stable shared runtime contracts"}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "verifier-safe XDP dataplane logic and shared-contract consistency"}
-{"file": "crates/walle-common/src/lib.rs", "reason": "shared RuntimeConfig, IcmpMode, IcmpRule, and stats layout contracts"}
-{"file": "crates/walle-ebpf/src/main.rs", "reason": "current XDP packet parsing and stats map update patterns"}
-{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "runtime config and ICMP rule data flow across daemon and XDP layers"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "parser failures and typed runtime errors"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "BPF map repository and ICMP runtime contract"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "structured logging and stable audit fields"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "avoid duplicate time formatting logic"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "verifier-safe packet path and test expectations"}
+{"file": "crates/walle-ebpf/src/lib.rs", "reason": "ICMP helper logic and rule-match utilities"}
+{"file": "crates/walle-common/src/lib.rs", "reason": "shared RuntimeConfig, IcmpRule, and stats contracts"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "common-policy to daemon to XDP data flow"}
+{"file": "crates/walle-ebpf/src/main.rs", "reason": "current XDP parsing and stats update path"}
+{"file": "crates/walle-daemon/src/runtime.rs", "reason": "runtime sync and cleanup logs"}
+{"file": "crates/walle-cli/src/main.rs", "reason": "CLI audit output and log formatter setup"}
+{"file": "crates/walle-daemon/src/detector.rs", "reason": "SSH ban timestamp fields and display boundary"}
+{"file": "crates/walle-daemon/src/lib.rs", "reason": "daemon follow-loop audit timestamps"}
+{"file": "crates/walle-daemon/src/main.rs", "reason": "daemon log formatter setup"}

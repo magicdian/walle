@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use tracing::{debug, info};
-use walle_common::{DEFAULT_MAP_PIN_PATH, XDP_PROGRAM_NAME};
+use walle_common::{
+    DEFAULT_MAP_PIN_PATH, MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG, MAP_NAME_DENY_V4,
+    MAP_NAME_DENY_V6, MAP_NAME_ICMP_RULES, MAP_NAME_STATS, XDP_PROGRAM_NAME,
+};
 
 #[cfg(target_os = "linux")]
 use std::fs;
@@ -105,6 +108,7 @@ fn attach_linux(
         path: map_pin_path.clone(),
         source,
     })?;
+    reset_pinned_maps(&map_pin_path)?;
 
     let mut ebpf = EbpfLoader::new()
         .map_pin_path(&map_pin_path)
@@ -159,6 +163,42 @@ fn attach_linux(
     })
 }
 
+#[cfg(target_os = "linux")]
+fn reset_pinned_maps(map_pin_path: &Path) -> Result<(), XdpError> {
+    for map_name in [
+        MAP_NAME_CONFIG,
+        MAP_NAME_ALLOW_V4,
+        MAP_NAME_ALLOW_V6,
+        MAP_NAME_DENY_V4,
+        MAP_NAME_DENY_V6,
+        MAP_NAME_ICMP_RULES,
+        MAP_NAME_STATS,
+    ] {
+        let pinned_path = map_pin_path.join(map_name);
+
+        match fs::remove_file(&pinned_path) {
+            Ok(()) => {
+                debug!(
+                    component = "xdp",
+                    event = "stale_map_pin_removed",
+                    map = map_name,
+                    path = %pinned_path.display(),
+                    "removed stale pinned map before loading the new object"
+                );
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(XdpError::ResetPinnedMap {
+                    path: pinned_path,
+                    source,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum XdpError {
     #[error(
@@ -167,6 +207,11 @@ pub enum XdpError {
     MissingObject { path: PathBuf },
     #[error("failed to create map pin directory '{path}': {source}")]
     CreatePinPath {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to reset pinned map '{path}': {source}")]
+    ResetPinnedMap {
         path: PathBuf,
         source: std::io::Error,
     },

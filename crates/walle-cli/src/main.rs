@@ -4,8 +4,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use tracing_subscriber::EnvFilter;
 use walle_common::{AccessMode, IcmpMode};
+use walle_daemon::logging::{format_unix_timestamp_secs, init_tracing};
 use walle_daemon::{DaemonOptions, WalleDaemon};
 use walle_policy::{IcmpAllowRule, WalleConfig};
 
@@ -188,10 +188,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .without_time()
-        .init();
+    init_tracing();
 
     let cli = Cli::parse();
 
@@ -386,8 +383,10 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
                 last_decision = daemon.process_ssh_log_line(&line, observed_at_secs)?;
                 if let Some(decision) = &last_decision {
                     println!(
-                        "ban decision: ip={}, matched_failures={}, expires_at_secs={}",
-                        decision.ip, decision.matched_failures, decision.expires_at_secs
+                        "ban decision: ip={}, matched_failures={}, expires_at={}",
+                        decision.ip,
+                        decision.matched_failures,
+                        format_unix_timestamp_secs(decision.expires_at_secs)
                     );
                     break;
                 }
@@ -423,8 +422,11 @@ fn print_ingest_summary(summary: &walle_daemon::detector::SshIngestSummary) {
 
     for ban in &summary.bans {
         println!(
-            "ban: ip={}, matched_failures={}, observed_at_secs={}, expires_at_secs={}",
-            ban.ip, ban.matched_failures, ban.observed_at_secs, ban.expires_at_secs
+            "ban: ip={}, matched_failures={}, observed_at={}, expires_at={}",
+            ban.ip,
+            ban.matched_failures,
+            format_unix_timestamp_secs(ban.observed_at_secs),
+            format_unix_timestamp_secs(ban.expires_at_secs)
         );
     }
 }

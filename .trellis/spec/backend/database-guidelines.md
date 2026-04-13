@@ -145,10 +145,14 @@ Current scaffold examples:
 
 * `WalleConfig::runtime_config() -> RuntimeConfig`
 * `RuntimeController::sync_policy(&WalleConfig) -> Result<(), RuntimeError>`
+* `LinuxMapRepository::replace_icmp_rules(&[IcmpRule]) -> Result<(), RuntimeError>`
 * `LinuxMapRepository::write_config(RuntimeConfig) -> Result<(), RuntimeError>`
+* `attach_linux(interface: &str, object_path: PathBuf, map_pin_path: PathBuf) -> Result<XdpAttachment, XdpError>`
 * `walle_ebpf::xdp::apply_icmp_policy(&RuntimeConfig, PacketAction, IcmpPacketKind, bool) -> PacketAction`
 * `evaluate_ipv4(&XdpContext, &RuntimeConfig) -> Result<PacketAction, ()>`
 * `evaluate_ipv6(&XdpContext, &RuntimeConfig) -> Result<PacketAction, ()>`
+* `cargo run -p xtask -- emit-bpftool-icmp-rule <payload-bytes> [map-path]`
+* `cargo run -p xtask -- emit-bpftool-clear-icmp-rule <payload-bytes> [map-path]`
 
 ### 3. Contracts
 
@@ -162,15 +166,26 @@ Current scaffold examples:
   * ingress ICMP/ICMPv6 echo request packets are dropped
   * ingress ICMP/ICMPv6 echo reply packets are allowed to follow the base access verdict
   * non-echo ICMP packets currently follow the ICMP drop branch unless a more specific rule is introduced later
-* `AllowRulesActive` currently keeps the policy contract (`rule_hit => allow`, miss => drop), but the exact raw-byte dataplane matcher is intentionally disabled until a verifier-safe implementation is restored.
-* If the verifier-safe exact-match path is unavailable, the code must degrade explicitly and keep real XDP attach working instead of shipping an unloadable program.
+* `AllowRulesActive` keeps the policy contract (`rule_hit => allow`, miss => drop) using the shared `icmp_rules` hash map as a presence set keyed by canonical exact-match `IcmpRule` bytes.
+* The pinned `icmp_rules` map contract is:
+  * map type: `HashMap`
+  * key: full `IcmpRule` bytes (`70` bytes with the current C layout)
+  * value: `u8` presence marker (`1` for enabled entries)
+* Control-plane sync and `bpftool` writes must serialize the full canonical `IcmpRule` into the map key; slot-based array updates are no longer valid.
+* Exact raw-byte rule matching applies to ICMP echo request/reply payload bytes only; dynamic ICMP header fields such as checksum, identifier, and sequence are not part of the match.
+* Exact payload matching is only supported when the echo payload length fits within `ICMP_RULE_PAYLOAD_CAPACITY`; longer payloads fall through as rule misses.
+* The XDP path must build one canonical lookup rule from the bounded echo payload and perform a single hash lookup; verifier-hostile slot scans are not allowed.
+* When the loader encounters a pinned-map directory from an older schema, it must remove the known pinned map files before loading the object so the new schema can be pinned cleanly.
 
 ### 4. Validation & Error Matrix
 
 * Valid runtime sync with `icmp_mode = Disabled` -> config map write succeeds and dataplane keeps the base access verdict for ICMP traffic.
 * Valid runtime sync with `icmp_mode = DropAll` -> config map write succeeds and ingress echo requests are dropped.
 * Valid runtime sync with `icmp_mode = DropAll` plus locally initiated `ping` -> ingress echo replies remain allowed.
-* Valid runtime sync with `icmp_mode = AllowRulesActive` and no verifier-safe rule matcher -> dataplane behaves as rule miss / drop for ICMP packets.
+* Valid runtime sync with `icmp_mode = AllowRulesActive` and a matching exact echo-payload rule -> dataplane allows the ICMP packet.
+* Valid runtime sync with `icmp_mode = AllowRulesActive` and no matching rule -> dataplane drops the ICMP packet.
+* Valid runtime sync with `icmp_mode = AllowRulesActive` and echo payload length above `ICMP_RULE_PAYLOAD_CAPACITY` -> dataplane treats the packet as a rule miss.
+* Valid startup with stale pinned maps from an older `icmp_rules` schema -> loader removes the old pins and startup continues with freshly pinned maps.
 * Invalid `RuntimeConfig` map access or map open failure -> `RuntimeError::MapOperation`.
 * Verifier-unsafe ICMP dataplane changes that prevent XDP attach are release-blocking and must not be hidden behind optimistic config sync.
 
@@ -178,30 +193,38 @@ Current scaffold examples:
 
 * Good:
   * external echo request traffic is dropped while a locally initiated `ping` still receives echo replies
+  * an exact raw-byte echo payload rule allows the matching request and its reply while non-matching payloads are dropped
+  * `ping -s 4 -p 09070108 <target>` succeeds after the matching rule is inserted, while `ping -s 4 -p 09070109 <target>` misses and is dropped
   * the daemon attaches XDP successfully and syncs the typed config map before packet tests begin
 * Base:
   * `icmp_mode = Disabled` with no ICMP rules keeps previous access behavior unchanged
-  * an empty ICMP rule set remains valid when the exact-match dataplane path is disabled
+  * an empty ICMP rule set remains valid and causes ICMP packets to miss / drop under `AllowRulesActive`
 * Bad:
   * treating `DropAll` as "drop every ingress ICMP packet including replies" when operators expect outbound reachability to continue
-  * keeping a verifier-breaking exact-match implementation enabled and making real XDP attach fail
+  * including dynamic ICMP echo header bytes in the rule contract and making stable RTT probes impossible
 
 ### 6. Tests Required
 
 * unit tests must assert ICMP packet classification for echo request vs echo reply across IPv4 and IPv6
 * unit tests must assert `DropAll` drops echo requests and keeps echo replies
+* dataplane tests or verifier-safe helper tests must assert exact-match ICMP rule hits, misses, and over-capacity misses
+* helper tests must assert `bpftool` command generation uses the serialized `IcmpRule` as the key and delete operations address the same key bytes
 * system validation must cover:
   * successful real XDP attach
+  * successful startup after a schema-changing map reload path
   * `DropAll` live map toggle
   * outbound `ping` success under `DropAll` because replies are still allowed
-* if exact-match dataplane support is reintroduced, add a regression test or documented verifier validation step that proves the program still loads on the supported kernel baseline
+  * `AllowRulesActive` live-map validation with a matching payload ping success and a non-matching payload ping failure
+* exact-match dataplane support must keep real XDP attach working on the supported kernel baseline
 
 ### 7. Wrong vs Correct
 
 #### Wrong
 
 * Define `DropAll` loosely as "drop ICMP" and let the dataplane also discard echo replies, breaking locally initiated connectivity checks.
+* Model `icmp_rules` as a slot-scanned array in the dataplane and rely on nested per-slot byte comparisons, causing verifier state explosion and failed attach on real kernels.
 
 #### Correct
 
 * Treat ICMP mode as a typed runtime contract: drop ingress echo requests, preserve ingress echo replies, and keep verifier-safe attachability as part of the feature definition.
+* Represent exact-match ICMP rules as canonical `IcmpRule` hash keys so the dataplane performs one bounded payload copy and one hash lookup per packet.

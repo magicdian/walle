@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod detector;
 pub mod error;
+pub mod logging;
 pub mod runtime;
 pub mod xdp;
 
@@ -16,6 +17,7 @@ use crate::detector::{
     SshResolvedLogSource,
 };
 pub use crate::error::DaemonError;
+use crate::logging::format_unix_timestamp_secs;
 use crate::runtime::{
     EnvironmentReport, RuntimeController, RuntimeSnapshot, log_environment_report,
     verify_environment,
@@ -184,7 +186,7 @@ impl WalleDaemon {
                             component = "ssh-detector",
                             event = "poll_summary",
                             iteration,
-                            observed_at_secs,
+                            observed_at = %format_unix_timestamp_secs(observed_at_secs),
                             lines_read = summary.lines_read,
                             matched_failures = summary.matched_failures,
                             bans = summary.bans.len(),
@@ -195,7 +197,7 @@ impl WalleDaemon {
                             component = "ssh-detector",
                             event = "poll_summary",
                             iteration,
-                            observed_at_secs,
+                            observed_at = %format_unix_timestamp_secs(observed_at_secs),
                             lines_read = 0,
                             matched_failures = 0,
                             bans = 0,
@@ -208,7 +210,7 @@ impl WalleDaemon {
                         component = "ssh-detector",
                         event = "poll_failed",
                         iteration,
-                        observed_at_secs,
+                        observed_at = %format_unix_timestamp_secs(observed_at_secs),
                         poll_interval_ms = self.options.ssh_poll_interval_ms,
                         error = %error,
                         "SSH source poll failed; retrying after backoff"

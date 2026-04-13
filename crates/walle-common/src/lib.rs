@@ -81,7 +81,7 @@ impl Default for IcmpMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum IcmpMatchType {
     RawBytesExact = 0,
@@ -213,7 +213,7 @@ impl Ipv6AddrKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct IcmpRule {
     pub match_type: IcmpMatchType,

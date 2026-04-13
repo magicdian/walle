@@ -5,3 +5,5 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+walle-common = { path = "../crates/walle-common" }
+walle-ebpf = { path = "../crates/walle-ebpf" }

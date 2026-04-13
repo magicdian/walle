@@ -10,8 +10,8 @@ use aya_ebpf::{
 use core::{mem, ptr};
 use walle_common::{
     ALLOW_MAP_CAPACITY, BanEntryV4, CONFIG_MAP_CAPACITY, CONFIG_MAP_KEY, DENY_MAP_CAPACITY,
-    ICMP_RULE_MAP_CAPACITY, IcmpRule, Ipv4AddrKey, Ipv6AddrKey, PacketAction, RuntimeConfig,
-    STATS_MAP_CAPACITY, STATS_MAP_KEY, StatsCounters,
+    ICMP_RULE_MAP_CAPACITY, ICMP_RULE_PAYLOAD_CAPACITY, IcmpMatchType, IcmpRule, Ipv4AddrKey,
+    Ipv6AddrKey, PacketAction, RuntimeConfig, STATS_MAP_CAPACITY, STATS_MAP_KEY, StatsCounters,
 };
 
 #[map(name = "config")]
@@ -30,7 +30,7 @@ static DENY_V4: HashMap<Ipv4AddrKey, BanEntryV4> = HashMap::pinned(DENY_MAP_CAPA
 static DENY_V6: HashMap<Ipv6AddrKey, BanEntryV4> = HashMap::pinned(DENY_MAP_CAPACITY, 0);
 
 #[map(name = "icmp_rules")]
-static ICMP_RULES: Array<IcmpRule> = Array::pinned(ICMP_RULE_MAP_CAPACITY, 0);
+static ICMP_RULES: HashMap<IcmpRule, u8> = HashMap::pinned(ICMP_RULE_MAP_CAPACITY, 0);
 
 #[map(name = "stats")]
 static STATS: Array<StatsCounters> = Array::pinned(STATS_MAP_CAPACITY, 0);
@@ -114,8 +114,14 @@ fn evaluate_ipv4(ctx: &XdpContext, config: &RuntimeConfig) -> Result<PacketActio
     let base_action = walle_ebpf::xdp::evaluate_access(config, is_whitelisted, is_blacklisted);
     let protocol = ip.protocol;
     let icmp_kind = classify_ipv4_icmp_packet(ctx, protocol, header_length)?;
-    // TODO: restore verifier-safe exact payload matching for AllowRulesActive.
-    let rule_hit = false;
+    let rule_hit = maybe_match_icmp_rules(
+        ctx,
+        config,
+        base_action,
+        icmp_kind,
+        ETH_HEADER_LEN + header_length,
+        usize::from(total_length) - header_length,
+    )?;
 
     if rule_hit {
         increment_icmp_rule_hits();
@@ -138,8 +144,14 @@ fn evaluate_ipv6(ctx: &XdpContext, config: &RuntimeConfig) -> Result<PacketActio
     let base_action = walle_ebpf::xdp::evaluate_access(config, is_whitelisted, is_blacklisted);
     let protocol = ip.next_header;
     let icmp_kind = classify_ipv6_icmp_packet(ctx, protocol)?;
-    // TODO: restore verifier-safe exact payload matching for AllowRulesActive.
-    let rule_hit = false;
+    let rule_hit = maybe_match_icmp_rules(
+        ctx,
+        config,
+        base_action,
+        icmp_kind,
+        ETH_HEADER_LEN + IPV6_HEADER_LEN,
+        usize::from(u16::from_be(ip.payload_length)),
+    )?;
 
     if rule_hit {
         increment_icmp_rule_hits();
@@ -214,6 +226,43 @@ fn increment_icmp_rule_hits() {
             (*stats).icmp_rule_hits = (*stats).icmp_rule_hits.saturating_add(1);
         }
     }
+}
+
+fn maybe_match_icmp_rules(
+    ctx: &XdpContext,
+    config: &RuntimeConfig,
+    base_action: PacketAction,
+    icmp_kind: walle_ebpf::xdp::IcmpPacketKind,
+    icmp_offset: usize,
+    icmp_length: usize,
+) -> Result<bool, ()> {
+    if !matches!(config.icmp_mode, walle_common::IcmpMode::AllowRulesActive)
+        || matches!(base_action, PacketAction::Drop)
+    {
+        return Ok(false);
+    }
+
+    let Some((payload_start, payload_length)) =
+        walle_ebpf::xdp::echo_payload_span(icmp_kind, icmp_length)
+    else {
+        return Ok(false);
+    };
+
+    let mut lookup_rule = IcmpRule {
+        match_type: IcmpMatchType::RawBytesExact,
+        payload_length: payload_length as u16,
+        enabled: 1,
+        reserved: 0,
+        payload: [0u8; ICMP_RULE_PAYLOAD_CAPACITY],
+    };
+    let mut payload_index = 0;
+    while payload_index < payload_length {
+        lookup_rule.payload[payload_index] =
+            read_u8(ctx, icmp_offset + payload_start + payload_index)?;
+        payload_index += 1;
+    }
+
+    Ok(unsafe { ICMP_RULES.get(&lookup_rule).is_some() })
 }
 
 fn ipv4_header_length(version_ihl: u8) -> Result<usize, ()> {
