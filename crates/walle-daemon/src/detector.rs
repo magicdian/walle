@@ -1,10 +1,21 @@
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
+#[cfg(target_os = "linux")]
+use std::io::{BufRead, BufReader};
 use std::net::IpAddr;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
-use std::process::Command;
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::time::Duration;
 
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -19,6 +30,30 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 pub enum SshResolvedLogSource {
     Journald,
     LogFile(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SshLiveSourceMode {
+    JournaldFollow,
+    LogFileWatch,
+    Polling,
+}
+
+impl SshLiveSourceMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::JournaldFollow => "journald_follow",
+            Self::LogFileWatch => "log_file_watch",
+            Self::Polling => "polling",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SshLiveSourceCapabilities {
+    journald_follow: bool,
+    file_watch: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,12 +104,28 @@ pub enum SshIngestError {
     ReadLogFile { path: String, source: io::Error },
     #[error("failed to seek SSH log file '{path}': {source}")]
     SeekLogFile { path: String, source: io::Error },
+    #[error("failed to watch SSH log file '{path}': {source}")]
+    WatchLogFile { path: String, source: io::Error },
     #[error("journald ingestion is only supported on Linux hosts")]
     UnsupportedJournald,
     #[error("failed to run journalctl: {0}")]
     Journalctl(io::Error),
     #[error("journalctl exited with status {status}: {stderr}")]
     JournalctlFailed { status: i32, stderr: String },
+    #[error("journalctl follow did not expose a readable stdout pipe")]
+    JournalctlMissingStdout,
+    #[error("journalctl follow process exited unexpectedly")]
+    JournalctlEnded,
+    #[error("failed to wait for SSH live source '{source_name}': {source}")]
+    WaitLiveSource {
+        source_name: String,
+        source: io::Error,
+    },
+    #[error("failed to read SSH live source '{source_name}': {source}")]
+    ReadLiveSource {
+        source_name: String,
+        source: io::Error,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -145,6 +196,10 @@ impl SshDetectorService {
     #[must_use]
     pub fn create_ingestor(&self) -> SshLogIngestor {
         SshLogIngestor::new(self.sources.clone())
+    }
+
+    pub fn create_live_ingestor(&self) -> SshLiveIngestor {
+        SshLiveIngestor::new(self.sources.clone())
     }
 
     #[must_use]
@@ -241,19 +296,16 @@ pub struct SshLogIngestor {
 impl SshLogIngestor {
     #[must_use]
     pub fn new(sources: Vec<SshResolvedLogSource>) -> Self {
-        let inputs = sources
-            .into_iter()
-            .map(|source| match source {
-                SshResolvedLogSource::Journald => {
-                    SshLogInput::Journald(JournalctlCursor::default())
-                }
-                SshResolvedLogSource::LogFile(path) => {
-                    SshLogInput::File(LogFileCursor::new(PathBuf::from(path)))
-                }
-            })
-            .collect();
+        Self {
+            inputs: build_log_inputs(sources, false),
+        }
+    }
 
-        Self { inputs }
+    #[must_use]
+    pub fn new_tailing(sources: Vec<SshResolvedLogSource>) -> Self {
+        Self {
+            inputs: build_log_inputs(sources, true),
+        }
     }
 
     pub fn poll_lines(&mut self) -> Result<Vec<String>, SshIngestError> {
@@ -272,6 +324,144 @@ impl SshLogIngestor {
     ) -> Result<Vec<String>, SshIngestError> {
         let mut cursor = LogFileCursor::new(path.into());
         cursor.read_all_lines()
+    }
+}
+
+fn build_log_inputs(sources: Vec<SshResolvedLogSource>, tail_from_end: bool) -> Vec<SshLogInput> {
+    sources
+        .into_iter()
+        .map(|source| match source {
+            SshResolvedLogSource::Journald => SshLogInput::Journald(JournalctlCursor::default()),
+            SshResolvedLogSource::LogFile(path) => {
+                let mut cursor = LogFileCursor::new(PathBuf::from(path));
+                if tail_from_end && let Err(error) = cursor.seek_to_end() {
+                    warn!(
+                        component = "ssh-detector",
+                        event = "tail_init_failed",
+                        path = %cursor.path.display(),
+                        error = %error,
+                        "failed to move SSH log cursor to the end during live-source initialization"
+                    );
+                }
+                SshLogInput::File(cursor)
+            }
+        })
+        .collect()
+}
+
+pub struct SshLiveIngestor {
+    mode: SshLiveSourceMode,
+    sources: Vec<SshResolvedLogSource>,
+    inner: SshLiveIngestorInner,
+}
+
+enum SshLiveIngestorInner {
+    Polling(SshLogIngestor),
+    #[cfg(target_os = "linux")]
+    JournaldFollow(JournalctlFollowSource),
+    #[cfg(target_os = "linux")]
+    LogFileWatch(LogFileWatchSource),
+}
+
+impl SshLiveIngestor {
+    pub fn new(sources: Vec<SshResolvedLogSource>) -> Self {
+        let capabilities = detect_live_source_capabilities();
+        let candidates = live_source_candidates(&sources, capabilities);
+
+        #[cfg(target_os = "linux")]
+        {
+            for mode in candidates {
+                match mode {
+                    SshLiveSourceMode::JournaldFollow => match JournalctlFollowSource::new() {
+                        Ok(source) => {
+                            return Self {
+                                mode,
+                                sources,
+                                inner: SshLiveIngestorInner::JournaldFollow(source),
+                            };
+                        }
+                        Err(error) => {
+                            warn!(
+                                component = "ssh-detector",
+                                event = "live_source_fallback",
+                                attempted_mode = mode.as_str(),
+                                error = %error,
+                                "failed to initialize preferred SSH live source; falling back"
+                            );
+                        }
+                    },
+                    SshLiveSourceMode::LogFileWatch => match LogFileWatchSource::new(&sources) {
+                        Ok(source) => {
+                            return Self {
+                                mode,
+                                sources,
+                                inner: SshLiveIngestorInner::LogFileWatch(source),
+                            };
+                        }
+                        Err(error) => {
+                            warn!(
+                                component = "ssh-detector",
+                                event = "live_source_fallback",
+                                attempted_mode = mode.as_str(),
+                                error = %error,
+                                "failed to initialize preferred SSH live source; falling back"
+                            );
+                        }
+                    },
+                    SshLiveSourceMode::Polling => {
+                        return Self::polling(sources);
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        let _ = candidates;
+
+        Self::polling(sources)
+    }
+
+    #[must_use]
+    pub fn mode(&self) -> SshLiveSourceMode {
+        self.mode
+    }
+
+    #[must_use]
+    pub fn sources(&self) -> &[SshResolvedLogSource] {
+        &self.sources
+    }
+
+    pub fn read_lines(&mut self, max_wait: Duration) -> Result<Vec<String>, SshIngestError> {
+        match &mut self.inner {
+            SshLiveIngestorInner::Polling(ingestor) => ingestor.poll_lines(),
+            #[cfg(target_os = "linux")]
+            SshLiveIngestorInner::JournaldFollow(source) => source.read_lines(max_wait),
+            #[cfg(target_os = "linux")]
+            SshLiveIngestorInner::LogFileWatch(source) => source.read_lines(max_wait),
+        }
+    }
+
+    pub fn log_startup(&self) {
+        info!(
+            component = "ssh-detector",
+            event = "live_source_selected",
+            mode = self.mode.as_str(),
+            sources = %self
+                .sources()
+                .iter()
+                .map(source_label)
+                .collect::<Vec<_>>()
+                .join(", "),
+            "selected SSH live ingestion mode"
+        );
+    }
+
+    fn polling(sources: Vec<SshResolvedLogSource>) -> Self {
+        Self {
+            mode: SshLiveSourceMode::Polling,
+            sources: sources.clone(),
+            inner: SshLiveIngestorInner::Polling(SshLogIngestor::new_tailing(sources)),
+        }
     }
 }
 
@@ -304,6 +494,33 @@ impl LogFileCursor {
             offset: 0,
             carryover: String::new(),
         }
+    }
+
+    fn seek_to_end(&mut self) -> Result<(), SshIngestError> {
+        let path_label = self.path.display().to_string();
+        let metadata = match File::open(&self.path) {
+            Ok(file) => file
+                .metadata()
+                .map_err(|source| SshIngestError::ReadLogFile {
+                    path: path_label.clone(),
+                    source,
+                })?,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                self.offset = 0;
+                self.carryover.clear();
+                return Ok(());
+            }
+            Err(source) => {
+                return Err(SshIngestError::ReadLogFile {
+                    path: path_label,
+                    source,
+                });
+            }
+        };
+
+        self.offset = metadata.len();
+        self.carryover.clear();
+        Ok(())
     }
 
     fn read_new_lines(&mut self) -> Result<Vec<String>, SshIngestError> {
@@ -477,6 +694,267 @@ fn run_journalctl(args: &[&str]) -> Result<std::process::Output, SshIngestError>
     }
 }
 
+#[cfg(target_os = "linux")]
+struct JournalctlFollowSource {
+    _child: Child,
+    stdout: BufReader<ChildStdout>,
+    carryover: String,
+}
+
+#[cfg(target_os = "linux")]
+impl JournalctlFollowSource {
+    fn new() -> Result<Self, SshIngestError> {
+        let mut child = Command::new("journalctl")
+            .args([
+                "--no-pager",
+                "--lines",
+                "0",
+                "--follow",
+                "-o",
+                "cat",
+                "-u",
+                "ssh",
+                "-u",
+                "sshd",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(SshIngestError::Journalctl)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(SshIngestError::JournalctlMissingStdout)?;
+
+        Ok(Self {
+            _child: child,
+            stdout: BufReader::new(stdout),
+            carryover: String::new(),
+        })
+    }
+
+    fn read_lines(&mut self, timeout: Duration) -> Result<Vec<String>, SshIngestError> {
+        let fd = self.stdout.get_ref().as_raw_fd();
+        if !wait_for_fd(fd, timeout, "journald_follow")? {
+            return Ok(Vec::new());
+        }
+
+        let mut lines = Vec::new();
+        loop {
+            let mut line = String::new();
+            match self.stdout.read_line(&mut line) {
+                Ok(0) => {
+                    if lines.is_empty() {
+                        return Err(SshIngestError::JournalctlEnded);
+                    }
+                    break;
+                }
+                Ok(_) => {
+                    let mut batch = split_lines_with_carryover(&mut self.carryover, line);
+                    lines.append(&mut batch);
+                }
+                Err(source) => {
+                    return Err(SshIngestError::ReadLiveSource {
+                        source_name: "journald_follow".to_string(),
+                        source,
+                    });
+                }
+            }
+
+            if !wait_for_fd(fd, Duration::ZERO, "journald_follow")? {
+                break;
+            }
+        }
+
+        Ok(lines)
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct LogFileWatchSource {
+    fd: OwnedFd,
+    directories: HashMap<i32, HashMap<String, String>>,
+    cursors: HashMap<String, LogFileCursor>,
+}
+
+#[cfg(target_os = "linux")]
+impl LogFileWatchSource {
+    fn new(sources: &[SshResolvedLogSource]) -> Result<Self, SshIngestError> {
+        let raw_fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+        if raw_fd < 0 {
+            return Err(SshIngestError::WatchLogFile {
+                path: "inotify".to_string(),
+                source: io::Error::last_os_error(),
+            });
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+        let mut directories: HashMap<i32, HashMap<String, String>> = HashMap::new();
+        let mut cursors = HashMap::new();
+
+        for path in sources.iter().filter_map(|source| match source {
+            SshResolvedLogSource::Journald => None,
+            SshResolvedLogSource::LogFile(path) => Some(path.clone()),
+        }) {
+            let parent = Path::new(&path)
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("/"));
+            let file_name = Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .ok_or_else(|| SshIngestError::WatchLogFile {
+                    path: path.clone(),
+                    source: io::Error::new(io::ErrorKind::InvalidInput, "missing file name"),
+                })?;
+
+            let directory_c = CString::new(parent.as_os_str().as_bytes()).map_err(|_| {
+                SshIngestError::WatchLogFile {
+                    path: parent.display().to_string(),
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "directory path contains an interior null byte",
+                    ),
+                }
+            })?;
+
+            let wd = unsafe {
+                libc::inotify_add_watch(
+                    raw_fd,
+                    directory_c.as_ptr(),
+                    libc::IN_CLOSE_WRITE
+                        | libc::IN_MODIFY
+                        | libc::IN_CREATE
+                        | libc::IN_MOVED_TO
+                        | libc::IN_ATTRIB,
+                )
+            };
+            if wd < 0 {
+                return Err(SshIngestError::WatchLogFile {
+                    path: parent.display().to_string(),
+                    source: io::Error::last_os_error(),
+                });
+            }
+
+            directories
+                .entry(wd)
+                .or_default()
+                .insert(file_name, path.clone());
+            let mut cursor = LogFileCursor::new(PathBuf::from(&path));
+            cursor.seek_to_end()?;
+            cursors.insert(path, cursor);
+        }
+
+        if cursors.is_empty() {
+            return Err(SshIngestError::WatchLogFile {
+                path: "log_file_watch".to_string(),
+                source: io::Error::new(io::ErrorKind::InvalidInput, "no log files configured"),
+            });
+        }
+
+        Ok(Self {
+            fd,
+            directories,
+            cursors,
+        })
+    }
+
+    fn read_lines(&mut self, timeout: Duration) -> Result<Vec<String>, SshIngestError> {
+        if !wait_for_fd(self.fd.as_raw_fd(), timeout, "log_file_watch")? {
+            return Ok(Vec::new());
+        }
+
+        let mut buffer = [0_u8; 4096];
+        let bytes_read = unsafe {
+            libc::read(
+                self.fd.as_raw_fd(),
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
+                buffer.len(),
+            )
+        };
+        if bytes_read < 0 {
+            return Err(SshIngestError::ReadLiveSource {
+                source_name: "log_file_watch".to_string(),
+                source: io::Error::last_os_error(),
+            });
+        }
+
+        let changed = parse_inotify_paths(&buffer[..bytes_read as usize], &self.directories);
+
+        let mut lines = Vec::new();
+        for path in changed {
+            let Some(cursor) = self.cursors.get_mut(&path) else {
+                continue;
+            };
+
+            if !Path::new(&path).exists() {
+                continue;
+            }
+
+            let mut batch = cursor.read_new_lines()?;
+            lines.append(&mut batch);
+        }
+
+        Ok(lines)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_inotify_paths(
+    buffer: &[u8],
+    directories: &HashMap<i32, HashMap<String, String>>,
+) -> Vec<String> {
+    let mut changed = HashSet::new();
+    let mut offset = 0_usize;
+
+    while offset + std::mem::size_of::<libc::inotify_event>() <= buffer.len() {
+        let event = unsafe { &*(buffer[offset..].as_ptr().cast::<libc::inotify_event>()) };
+        let event_size = std::mem::size_of::<libc::inotify_event>() + event.len as usize;
+        if offset + event_size > buffer.len() {
+            break;
+        }
+
+        if let Some(files) = directories.get(&event.wd) {
+            let name_bytes =
+                &buffer[offset + std::mem::size_of::<libc::inotify_event>()..offset + event_size];
+            let name = name_bytes
+                .split(|byte| *byte == 0)
+                .next()
+                .map(|value| String::from_utf8_lossy(value).to_string())
+                .unwrap_or_default();
+
+            if let Some(path) = files.get(&name) {
+                changed.insert(path.clone());
+            }
+        }
+
+        offset += event_size;
+    }
+
+    let mut changed = changed.into_iter().collect::<Vec<_>>();
+    changed.sort();
+    changed
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_fd(fd: RawFd, timeout: Duration, source_name: &str) -> Result<bool, SshIngestError> {
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+
+    if result < 0 {
+        return Err(SshIngestError::WaitLiveSource {
+            source_name: source_name.to_string(),
+            source: io::Error::last_os_error(),
+        });
+    }
+
+    Ok(result > 0 && (poll_fd.revents & libc::POLLIN) != 0)
+}
+
 fn split_lines_with_carryover(carryover: &mut String, buffer: String) -> Vec<String> {
     let mut combined = String::new();
     if !carryover.is_empty() {
@@ -531,6 +1009,43 @@ fn source_label(source: &SshResolvedLogSource) -> String {
     }
 }
 
+fn detect_live_source_capabilities() -> SshLiveSourceCapabilities {
+    #[cfg(target_os = "linux")]
+    {
+        SshLiveSourceCapabilities {
+            journald_follow: Path::new(JOURNAL_SOCKET_PATH).exists(),
+            file_watch: true,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        SshLiveSourceCapabilities::default()
+    }
+}
+
+fn live_source_candidates(
+    sources: &[SshResolvedLogSource],
+    capabilities: SshLiveSourceCapabilities,
+) -> Vec<SshLiveSourceMode> {
+    let has_journald = sources
+        .iter()
+        .any(|source| matches!(source, SshResolvedLogSource::Journald));
+    let has_log_files = sources
+        .iter()
+        .any(|source| matches!(source, SshResolvedLogSource::LogFile(_)));
+
+    let mut modes = Vec::new();
+    if has_journald && capabilities.journald_follow {
+        modes.push(SshLiveSourceMode::JournaldFollow);
+    }
+    if has_log_files && capabilities.file_watch {
+        modes.push(SshLiveSourceMode::LogFileWatch);
+    }
+    modes.push(SshLiveSourceMode::Polling);
+    modes
+}
+
 fn resolve_sources_for_host(policy: &SshProtectionPolicy) -> Vec<SshResolvedLogSource> {
     resolve_sources_with(policy, Path::new(JOURNAL_SOCKET_PATH).exists(), |path| {
         Path::new(path).exists()
@@ -549,6 +1064,10 @@ where
         SshLogSourceMode::Journald => vec![SshResolvedLogSource::Journald],
         SshLogSourceMode::LogFiles => configured_log_files(policy),
         SshLogSourceMode::Auto => {
+            if journald_available {
+                return vec![SshResolvedLogSource::Journald];
+            }
+
             let configured = configured_log_files(policy);
             let existing = configured
                 .into_iter()
@@ -560,10 +1079,6 @@ where
 
             if !existing.is_empty() {
                 return existing;
-            }
-
-            if journald_available {
-                return vec![SshResolvedLogSource::Journald];
             }
 
             default_log_files()
@@ -652,7 +1167,8 @@ mod tests {
     use walle_policy::{SshLogSourceMode, SshProtectionPolicy};
 
     use super::{
-        LogFileCursor, SshDetectorService, SshFailureReason, SshLogIngestor, SshResolvedLogSource,
+        LogFileCursor, SshDetectorService, SshFailureReason, SshLiveSourceCapabilities,
+        SshLiveSourceMode, SshLogIngestor, SshResolvedLogSource, live_source_candidates,
         parse_failure_event, resolve_sources_with, split_lines_with_carryover,
     };
 
@@ -673,7 +1189,14 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_prefers_existing_linux_log_file() {
+    fn auto_mode_prefers_journald_when_available() {
+        let policy = SshProtectionPolicy::default();
+        let sources = resolve_sources_with(&policy, true, |path| path == "/var/log/auth.log");
+        assert_eq!(sources, vec![SshResolvedLogSource::Journald]);
+    }
+
+    #[test]
+    fn auto_mode_falls_back_to_existing_log_file_when_journald_is_unavailable() {
         let policy = SshProtectionPolicy::default();
         let sources = resolve_sources_with(&policy, false, |path| path == "/var/log/auth.log");
         assert_eq!(
@@ -693,6 +1216,55 @@ mod tests {
 
         let sources = resolve_sources_with(&policy, false, |_| false);
         assert_eq!(sources, vec![SshResolvedLogSource::Journald]);
+    }
+
+    #[test]
+    fn live_source_candidates_prefer_event_driven_then_polling_for_journald() {
+        let modes = live_source_candidates(
+            &[SshResolvedLogSource::Journald],
+            SshLiveSourceCapabilities {
+                journald_follow: true,
+                file_watch: true,
+            },
+        );
+
+        assert_eq!(
+            modes,
+            vec![
+                SshLiveSourceMode::JournaldFollow,
+                SshLiveSourceMode::Polling
+            ]
+        );
+    }
+
+    #[test]
+    fn live_source_candidates_prefer_file_watch_then_polling_for_log_files() {
+        let modes = live_source_candidates(
+            &[SshResolvedLogSource::LogFile(
+                "/var/log/auth.log".to_string(),
+            )],
+            SshLiveSourceCapabilities {
+                journald_follow: true,
+                file_watch: true,
+            },
+        );
+
+        assert_eq!(
+            modes,
+            vec![SshLiveSourceMode::LogFileWatch, SshLiveSourceMode::Polling]
+        );
+    }
+
+    #[test]
+    fn live_source_candidates_fall_back_to_polling_when_watch_support_is_missing() {
+        let modes = live_source_candidates(
+            &[SshResolvedLogSource::LogFile(
+                "/var/log/auth.log".to_string(),
+            )],
+            SshLiveSourceCapabilities::default(),
+        );
+
+        assert_eq!(modes, vec![SshLiveSourceMode::Polling]);
     }
 
     #[test]

@@ -18,3 +18,4 @@ walle-policy = { path = "../walle-policy" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aya.workspace = true
+libc = "0.2"

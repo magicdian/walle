@@ -2,7 +2,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod detector;
@@ -16,8 +15,8 @@ use walle_common::{AccessMode, IcmpMode, MAP_NAME_CONFIG, StatsCounters};
 use walle_policy::{InterfacePolicy, WalleConfig};
 
 use crate::detector::{
-    SshBanDecision, SshDetectorService, SshFailureEvent, SshIngestSummary, SshLogIngestor,
-    SshResolvedLogSource,
+    SshBanDecision, SshDetectorService, SshFailureEvent, SshIngestSummary, SshLiveIngestor,
+    SshLiveSourceMode, SshLogIngestor, SshResolvedLogSource,
 };
 pub use crate::error::{DaemonError, RuntimeLockError};
 use crate::logging::format_unix_timestamp_secs;
@@ -92,7 +91,8 @@ pub struct InterfaceStatusSnapshot {
 
 pub struct WalleDaemon {
     detector: SshDetectorService,
-    ssh_ingestor: SshLogIngestor,
+    ssh_live_ingestor: SshLiveIngestor,
+    ssh_poll_ingestor: SshLogIngestor,
     runtimes: Vec<InterfaceRuntime>,
     config: WalleConfig,
     options: DaemonOptions,
@@ -115,7 +115,8 @@ impl WalleDaemon {
         config.validate()?;
 
         let detector = SshDetectorService::new(config.ssh_policy().clone());
-        let ssh_ingestor = detector.create_ingestor();
+        let ssh_live_ingestor = detector.create_live_ingestor();
+        let ssh_poll_ingestor = detector.create_ingestor();
         let selected_interfaces = select_interfaces(&config, options.interface.as_deref())?;
         let runtimes = selected_interfaces
             .into_iter()
@@ -128,7 +129,8 @@ impl WalleDaemon {
 
         Ok(Self {
             detector,
-            ssh_ingestor,
+            ssh_live_ingestor,
+            ssh_poll_ingestor,
             runtimes,
             config,
             options,
@@ -185,6 +187,7 @@ impl WalleDaemon {
         }
 
         self.detector.log_startup();
+        self.ssh_live_ingestor.log_startup();
         let observed_at_secs = unix_timestamp_secs();
         for runtime in &mut self.runtimes {
             runtime
@@ -225,11 +228,13 @@ impl WalleDaemon {
     pub fn run_ssh_follow_loop(&mut self) -> Result<(), DaemonError> {
         let max_iterations = self.options.ssh_follow_iterations;
         let poll_interval = Duration::from_millis(self.options.ssh_poll_interval_ms);
+        let live_mode = self.ssh_live_ingestor.mode();
 
         info!(
             component = "daemon",
             event = "ssh_follow_loop_start",
             poll_interval_ms = self.options.ssh_poll_interval_ms,
+            live_mode = live_mode.as_str(),
             max_iterations = max_iterations
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unbounded".to_string()),
@@ -255,12 +260,13 @@ impl WalleDaemon {
                 runtime.runtime.expire_bans(observed_at_secs)?;
             }
 
-            match self.poll_ssh_sources(observed_at_secs) {
+            match self.read_live_ssh_sources(observed_at_secs, poll_interval) {
                 Ok(summary) => {
-                    if summary.lines_read > 0 || !summary.bans.is_empty() {
+                    if summary.lines_read > 0 {
                         info!(
                             component = "ssh-detector",
-                            event = "poll_summary",
+                            event = "live_batch_processed",
+                            mode = live_mode.as_str(),
                             iteration,
                             observed_at = %format_unix_timestamp_secs(observed_at_secs),
                             lines_read = summary.lines_read,
@@ -268,10 +274,11 @@ impl WalleDaemon {
                             bans = summary.bans.len(),
                             "processed SSH source batch"
                         );
-                    } else {
+                    } else if matches!(live_mode, SshLiveSourceMode::Polling) {
                         debug!(
                             component = "ssh-detector",
-                            event = "poll_summary",
+                            event = "live_batch_idle",
+                            mode = live_mode.as_str(),
                             iteration,
                             observed_at = %format_unix_timestamp_secs(observed_at_secs),
                             lines_read = 0,
@@ -284,12 +291,13 @@ impl WalleDaemon {
                 Err(error) => {
                     warn!(
                         component = "ssh-detector",
-                        event = "poll_failed",
+                        event = "live_read_failed",
+                        mode = live_mode.as_str(),
                         iteration,
                         observed_at = %format_unix_timestamp_secs(observed_at_secs),
                         poll_interval_ms = self.options.ssh_poll_interval_ms,
                         error = %error,
-                        "SSH source poll failed; retrying after backoff"
+                        "SSH live source read failed; retrying after backoff"
                     );
                 }
             }
@@ -303,8 +311,6 @@ impl WalleDaemon {
                 );
                 return Ok(());
             }
-
-            thread::sleep(poll_interval);
         }
     }
 
@@ -413,14 +419,8 @@ impl WalleDaemon {
         &mut self,
         observed_at_secs: u64,
     ) -> Result<SshIngestSummary, DaemonError> {
-        let lines = self.ssh_ingestor.poll_lines()?;
-        let summary = self.detector.replay_lines(lines, observed_at_secs, 1);
-
-        for decision in &summary.bans {
-            self.apply_ssh_ban_to_all(decision.clone())?;
-        }
-
-        Ok(summary)
+        let lines = self.ssh_poll_ingestor.poll_lines()?;
+        self.process_ssh_lines(lines, observed_at_secs)
     }
 
     pub fn replay_ssh_log_file(
@@ -441,6 +441,29 @@ impl WalleDaemon {
 
     fn should_run_follow_loop(&self) -> bool {
         self.options.foreground && self.options.ssh_follow_iterations != Some(0)
+    }
+
+    fn read_live_ssh_sources(
+        &mut self,
+        observed_at_secs: u64,
+        max_wait: Duration,
+    ) -> Result<SshIngestSummary, DaemonError> {
+        let lines = self.ssh_live_ingestor.read_lines(max_wait)?;
+        self.process_ssh_lines(lines, observed_at_secs)
+    }
+
+    fn process_ssh_lines(
+        &mut self,
+        lines: Vec<String>,
+        observed_at_secs: u64,
+    ) -> Result<SshIngestSummary, DaemonError> {
+        let summary = self.detector.replay_lines(lines, observed_at_secs, 1);
+
+        for decision in &summary.bans {
+            self.apply_ssh_ban_to_all(decision.clone())?;
+        }
+
+        Ok(summary)
     }
 
     fn apply_ssh_ban_to_all(&mut self, decision: SshBanDecision) -> Result<(), DaemonError> {
