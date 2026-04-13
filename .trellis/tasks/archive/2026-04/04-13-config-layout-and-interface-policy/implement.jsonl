@@ -1,0 +1,5 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "shared config contracts and tests for security-sensitive runtime changes"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "config load and validation failures must remain typed and actionable"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "config schema and runtime sync contracts for global detectors and per-interface filters"}
