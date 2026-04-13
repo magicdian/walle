@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
+- **Total Sessions**: 6
 - **Last Active**: 2026-04-13
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~194 | Active |
+| `journal-1.md` | ~227 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits |
 |---|------|-------|---------|
+| 6 | 2026-04-13 | Prefer event-driven SSH ingestion | `98e3515`, `2f32ebd` |
 | 5 | 2026-04-13 | Multi-interface status and config-driven logging | `440ced0`, `7cb0979` |
 | 4 | 2026-04-13 | Unify walle runtime entrypoint | `6d4ee09` |
 | 3 | 2026-04-13 | ICMP dataplane enforcement validated on real host | `25493bf` |

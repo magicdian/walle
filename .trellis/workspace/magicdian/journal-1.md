@@ -192,3 +192,36 @@ Added multi-interface status reporting, config-driven logging levels, and archiv
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Prefer event-driven SSH ingestion
+
+**Date**: 2026-04-13
+**Task**: Prefer event-driven SSH ingestion
+
+### Summary
+
+Implemented live SSH source selection with journald follow preferred, inotify file-watch fallback, and polling as the final compatibility path; user validated journald_follow behavior and ban application logs.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `98e3515` | (see git log) |
+| `2f32ebd` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
