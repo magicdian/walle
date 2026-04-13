@@ -127,3 +127,35 @@ Switched icmp_rules to a verifier-safe hash lookup, reset stale pinned maps on a
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: Unify walle runtime entrypoint
+
+**Date**: 2026-04-13
+**Task**: Unify walle runtime entrypoint
+
+### Summary
+
+Unified the user-facing binary as walle, removed the standalone daemon executable, added single-instance runtime locking for run, and reserved a reload command placeholder.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6d4ee09` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
