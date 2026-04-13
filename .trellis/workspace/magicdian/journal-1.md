@@ -294,3 +294,36 @@ Added a generic GP core with SSH adapter integration, fail-open outcomes, policy
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: SSH jail containment and invalid-user fast ban
+
+**Date**: 2026-04-14
+**Task**: SSH jail containment and invalid-user fast ban
+
+### Summary
+
+Implemented in-
+  process sshjail containment, invalid-user fast ban, tc/XDP redirect precedence fixes, and regression/spec updates.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8377ff69537efaca12153bbf96e9cc2d95eec585` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
