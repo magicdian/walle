@@ -3,7 +3,15 @@
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_MAP_KEY: u32 = 0;
+pub const STATS_MAP_KEY: u32 = 0;
 pub const ICMP_RULE_PAYLOAD_CAPACITY: usize = 64;
+pub const CONFIG_MAP_CAPACITY: u32 = 1;
+pub const STATS_MAP_CAPACITY: u32 = 1;
+pub const ALLOW_MAP_CAPACITY: u32 = 4096;
+pub const DENY_MAP_CAPACITY: u32 = 4096;
+pub const ICMP_RULE_MAP_CAPACITY: u32 = 256;
+pub const XDP_PROGRAM_NAME: &str = "walle_ingress";
+pub const DEFAULT_MAP_PIN_PATH: &str = "/sys/fs/bpf/walle";
 pub const MAP_NAME_CONFIG: &str = "config";
 pub const MAP_NAME_ALLOW_V4: &str = "allow_v4";
 pub const MAP_NAME_ALLOW_V6: &str = "allow_v6";
@@ -15,8 +23,8 @@ pub const MAP_NAME_STATS: &str = "stats";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum PacketAction {
-    Allow = 1,
-    Drop = 2,
+    Allow = 0,
+    Drop = 1,
 }
 
 impl Default for PacketAction {
@@ -28,9 +36,9 @@ impl Default for PacketAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum AccessMode {
+    BlacklistOnly = 0,
     WhitelistOnly = 1,
-    BlacklistOnly = 2,
-    BlacklistWithWhitelistException = 3,
+    BlacklistWithWhitelistException = 2,
 }
 
 impl AccessMode {
@@ -76,9 +84,9 @@ impl Default for IcmpMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum IcmpMatchType {
-    RawBytesExact = 1,
-    StringExact = 2,
-    Regex = 3,
+    RawBytesExact = 0,
+    StringExact = 1,
+    Regex = 2,
 }
 
 impl Default for IcmpMatchType {
@@ -90,9 +98,9 @@ impl Default for IcmpMatchType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum BanSource {
-    Manual = 1,
-    SshDetector = 2,
-    FutureHttpDetector = 3,
+    Manual = 0,
+    SshDetector = 1,
+    FutureHttpDetector = 2,
 }
 
 impl Default for BanSource {
@@ -104,9 +112,9 @@ impl Default for BanSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum BanReasonCode {
-    Manual = 1,
-    SshAuthFailures = 2,
-    FutureHttpAbuse = 3,
+    Manual = 0,
+    SshAuthFailures = 1,
+    FutureHttpAbuse = 2,
 }
 
 impl Default for BanReasonCode {
@@ -279,3 +287,16 @@ mod tests {
         assert_eq!(entry.expires_at_ns, 0);
     }
 }
+
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for RuntimeConfig {}
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for BanEntryV4 {}
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for Ipv4AddrKey {}
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for Ipv6AddrKey {}
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for IcmpRule {}
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for StatsCounters {}

@@ -3,5 +3,23 @@ name = "walle-ebpf"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+ebpf = []
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "walle-ebpf"
+path = "src/main.rs"
+required-features = ["ebpf"]
+test = false
+doc = false
+bench = false
+
 [dependencies]
 walle-common = { path = "../walle-common" }
+
+[target.'cfg(all(target_arch = "bpf", target_os = "none"))'.dependencies]
+aya-ebpf.workspace = true

@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -34,6 +35,14 @@ struct RunArgs {
     interface: Option<String>,
     #[arg(long, default_value_t = true)]
     foreground: bool,
+    #[arg(long)]
+    xdp_object: Option<PathBuf>,
+    #[arg(long)]
+    map_pin_path: Option<PathBuf>,
+    #[arg(long, default_value_t = 1_000)]
+    ssh_poll_interval_ms: u64,
+    #[arg(long)]
+    ssh_follow_iterations: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -204,11 +213,19 @@ fn run_daemon(args: RunArgs) -> Result<()> {
         DaemonOptions {
             interface: args.interface,
             foreground: args.foreground,
+            xdp_object: args.xdp_object,
+            map_pin_path: args.map_pin_path,
+            ssh_poll_interval_ms: args.ssh_poll_interval_ms,
+            ssh_follow_iterations: args.ssh_follow_iterations,
         },
     )?;
 
     daemon.run()?;
-    println!("walle daemon scaffold started successfully");
+    if args.foreground {
+        println!("walle daemon exited after completing the requested SSH follow loop");
+    } else {
+        println!("walle daemon startup completed without entering the SSH follow loop");
+    }
     Ok(())
 }
 
@@ -227,6 +244,7 @@ fn show_status() -> Result<()> {
         snapshot.ssh_protection_enabled
     );
     println!("ssh_failure_threshold: {}", snapshot.ssh_failure_threshold);
+    println!("xdp_attached: {}", snapshot.xdp_attached);
     println!("allow_v4_entries: {}", snapshot.allow_v4_entries);
     println!("allow_v6_entries: {}", snapshot.allow_v6_entries);
     println!("deny_v4_entries: {}", snapshot.deny_v4_entries);
@@ -242,6 +260,10 @@ fn verify_environment(args: VerifyEnvArgs) -> Result<()> {
         DaemonOptions {
             interface: args.interface,
             foreground: true,
+            xdp_object: None,
+            map_pin_path: None,
+            ssh_poll_interval_ms: 1_000,
+            ssh_follow_iterations: Some(0),
         },
     )?;
     let report = daemon.verify_environment();

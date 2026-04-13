@@ -1,0 +1,5 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "verify ICMP dataplane matches map and shared-type contracts"}
+{"file": "crates/walle-ebpf/src/main.rs", "reason": "review ICMP parsing, rule matching, and stats updates in dataplane"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "verify bounded packet-path logic and required tests"}

@@ -1,0 +1,44 @@
+{
+  "id": "ssh-follow-service-loop",
+  "name": "ssh-follow-service-loop",
+  "title": "Implement SSH follow service loop",
+  "description": "Add a long-running SSH ingestion follow loop that continuously tails configured sources and feeds the detector.",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "priority": "P1",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-13",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-13-real-xdp-runtime-roadmap",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

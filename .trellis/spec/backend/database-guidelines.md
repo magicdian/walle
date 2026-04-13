@@ -134,3 +134,74 @@ Current scaffold examples:
 * [`walle-common runtime structs`](E:/coding/github_projects/walle/crates/walle-common/src/lib.rs): map-safe structs and enums
 * [`walle-policy config schema`](E:/coding/github_projects/walle/crates/walle-policy/src/lib.rs): operator-facing config separated from runtime structs
 * [`walle-daemon runtime controller`](E:/coding/github_projects/walle/crates/walle-daemon/src/runtime.rs): runtime config sync boundary
+
+## Scenario: ICMP Runtime Config And Dataplane Contract
+
+### 1. Scope / Trigger
+
+* Trigger: Any change to `RuntimeConfig`, ICMP mode semantics, pinned `config` map updates, or XDP ICMP decision logic.
+
+### 2. Signatures
+
+* `WalleConfig::runtime_config() -> RuntimeConfig`
+* `RuntimeController::sync_policy(&WalleConfig) -> Result<(), RuntimeError>`
+* `LinuxMapRepository::write_config(RuntimeConfig) -> Result<(), RuntimeError>`
+* `walle_ebpf::xdp::apply_icmp_policy(&RuntimeConfig, PacketAction, IcmpPacketKind, bool) -> PacketAction`
+* `evaluate_ipv4(&XdpContext, &RuntimeConfig) -> Result<PacketAction, ()>`
+* `evaluate_ipv6(&XdpContext, &RuntimeConfig) -> Result<PacketAction, ()>`
+
+### 3. Contracts
+
+* The pinned `config` map remains a singleton entry keyed by `CONFIG_MAP_KEY = 0`.
+* `RuntimeConfig::icmp_mode` must keep stable shared discriminants:
+  * `Disabled = 0`
+  * `DropAll = 1`
+  * `AllowRulesActive = 2`
+* Control-plane sync must write ICMP mode through the typed `RuntimeConfig` contract, even when operators inspect or override the live map with `bpftool`.
+* `DropAll` means:
+  * ingress ICMP/ICMPv6 echo request packets are dropped
+  * ingress ICMP/ICMPv6 echo reply packets are allowed to follow the base access verdict
+  * non-echo ICMP packets currently follow the ICMP drop branch unless a more specific rule is introduced later
+* `AllowRulesActive` currently keeps the policy contract (`rule_hit => allow`, miss => drop), but the exact raw-byte dataplane matcher is intentionally disabled until a verifier-safe implementation is restored.
+* If the verifier-safe exact-match path is unavailable, the code must degrade explicitly and keep real XDP attach working instead of shipping an unloadable program.
+
+### 4. Validation & Error Matrix
+
+* Valid runtime sync with `icmp_mode = Disabled` -> config map write succeeds and dataplane keeps the base access verdict for ICMP traffic.
+* Valid runtime sync with `icmp_mode = DropAll` -> config map write succeeds and ingress echo requests are dropped.
+* Valid runtime sync with `icmp_mode = DropAll` plus locally initiated `ping` -> ingress echo replies remain allowed.
+* Valid runtime sync with `icmp_mode = AllowRulesActive` and no verifier-safe rule matcher -> dataplane behaves as rule miss / drop for ICMP packets.
+* Invalid `RuntimeConfig` map access or map open failure -> `RuntimeError::MapOperation`.
+* Verifier-unsafe ICMP dataplane changes that prevent XDP attach are release-blocking and must not be hidden behind optimistic config sync.
+
+### 5. Good/Base/Bad Cases
+
+* Good:
+  * external echo request traffic is dropped while a locally initiated `ping` still receives echo replies
+  * the daemon attaches XDP successfully and syncs the typed config map before packet tests begin
+* Base:
+  * `icmp_mode = Disabled` with no ICMP rules keeps previous access behavior unchanged
+  * an empty ICMP rule set remains valid when the exact-match dataplane path is disabled
+* Bad:
+  * treating `DropAll` as "drop every ingress ICMP packet including replies" when operators expect outbound reachability to continue
+  * keeping a verifier-breaking exact-match implementation enabled and making real XDP attach fail
+
+### 6. Tests Required
+
+* unit tests must assert ICMP packet classification for echo request vs echo reply across IPv4 and IPv6
+* unit tests must assert `DropAll` drops echo requests and keeps echo replies
+* system validation must cover:
+  * successful real XDP attach
+  * `DropAll` live map toggle
+  * outbound `ping` success under `DropAll` because replies are still allowed
+* if exact-match dataplane support is reintroduced, add a regression test or documented verifier validation step that proves the program still loads on the supported kernel baseline
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+* Define `DropAll` loosely as "drop ICMP" and let the dataplane also discard echo replies, breaking locally initiated connectivity checks.
+
+#### Correct
+
+* Treat ICMP mode as a typed runtime contract: drop ingress echo requests, preserve ingress echo replies, and keep verifier-safe attachability as part of the feature definition.

@@ -1,0 +1,7 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "structured SSH detector and runtime ban logs"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "typed daemon ingestion errors and recoverable loop behavior"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "daemon/runtime correctness and detector-runtime separation"}
+{"file": "crates/walle-daemon/src/detector.rs", "reason": "existing SSH parsing, source resolution, and ingestion cursor patterns"}
+{"file": "crates/walle-daemon/src/runtime.rs", "reason": "runtime ban application and expiry lifecycle"}

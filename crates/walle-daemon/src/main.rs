@@ -21,7 +21,13 @@ fn run() -> Result<()> {
         .without_time()
         .init();
 
-    let mut daemon = WalleDaemon::new(WalleConfig::default(), DaemonOptions::default())?;
+    let mut daemon = WalleDaemon::new(
+        WalleConfig::default(),
+        DaemonOptions {
+            foreground: true,
+            ..DaemonOptions::default()
+        },
+    )?;
     daemon.run()?;
 
     Ok(())

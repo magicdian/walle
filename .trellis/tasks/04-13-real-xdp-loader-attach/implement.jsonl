@@ -1,0 +1,11 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Keep crate boundaries clear between CLI, daemon, common types, and eBPF code."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Use typed loader and attach errors with actionable boundary context."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Emit structured attach and compatibility logs in daemon runtime."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Keep shared map layouts explicit and verifier-safe."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Align shared structs and error boundaries across common, ebpf, daemon, and CLI layers."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Treat BPF maps as a typed runtime repository contract from the start."}
+{"file": "crates/walle-ebpf/src/lib.rs", "reason": "Current helper-only dataplane placeholder to replace with a real program path."}
+{"file": "crates/walle-cli/src/main.rs", "reason": "Existing CLI command and run option patterns."}
+{"file": "crates/walle-daemon/src/runtime.rs", "reason": "Existing runtime orchestration and environment checks."}

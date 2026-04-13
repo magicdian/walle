@@ -1,0 +1,6 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "Validate control-plane to map to XDP data flow remains aligned with design."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify the runtime repository stays typed and map-contract-safe."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify cross-layer layouts and fallback behavior remain coherent."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify map backend failures are actionable and not stringly typed."}

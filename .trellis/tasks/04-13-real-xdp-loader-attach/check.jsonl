@@ -1,0 +1,6 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify attach/startup logs use stable structured fields."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify typed attach/load failures remain actionable."}
+{"file": "docs/architecture/walle-system-design.md", "reason": "Validate the implementation still matches the intended system split."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify shared layouts and packet-path behavior stay simple."}

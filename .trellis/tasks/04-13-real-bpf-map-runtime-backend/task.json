@@ -1,0 +1,44 @@
+{
+  "id": "real-bpf-map-runtime-backend",
+  "name": "real-bpf-map-runtime-backend",
+  "title": "Implement real BPF map runtime backend",
+  "description": "Replace the daemon's in-memory repository with shared BPF map read/write operations and pinned-map integration.",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "priority": "P0",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-13",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-13-real-xdp-runtime-roadmap",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

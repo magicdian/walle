@@ -3,6 +3,7 @@ use walle_policy::PolicyError;
 
 use crate::detector::SshIngestError;
 use crate::runtime::RuntimeError;
+use crate::xdp::XdpError;
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
@@ -12,4 +13,6 @@ pub enum DaemonError {
     SshIngest(#[from] SshIngestError),
     #[error("runtime operation failed: {0}")]
     Runtime(#[from] RuntimeError),
+    #[error("XDP operation failed: {0}")]
+    Xdp(#[from] XdpError),
 }

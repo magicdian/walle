@@ -1,0 +1,7 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "BPF map repository and stable shared runtime contracts"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "verifier-safe XDP dataplane logic and shared-contract consistency"}
+{"file": "crates/walle-common/src/lib.rs", "reason": "shared RuntimeConfig, IcmpMode, IcmpRule, and stats layout contracts"}
+{"file": "crates/walle-ebpf/src/main.rs", "reason": "current XDP packet parsing and stats map update patterns"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "runtime config and ICMP rule data flow across daemon and XDP layers"}

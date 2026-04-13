@@ -1,0 +1,9 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Use a dedicated typed runtime repository for BPF map access rather than ad-hoc map mutation."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Preserve typed map-open and map-update failures with source context."}
+{"file": "crates/walle-daemon/src/runtime.rs", "reason": "Current in-memory repository and runtime sync behavior to replace on Linux."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Emit stable structured logs for backend selection and map sync operations."}
+{"file": "crates/walle-daemon/src/xdp.rs", "reason": "Pinned map path and loader lifecycle integration point."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Keep shared map layouts explicit and do not duplicate policy semantics in the repository layer."}
+{"file": "crates/walle-common/src/lib.rs", "reason": "Shared key/value contracts and map names used by userspace and eBPF."}

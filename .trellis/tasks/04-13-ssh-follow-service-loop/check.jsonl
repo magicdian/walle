@@ -1,0 +1,6 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "verify recoverable SSH ingestion failures remain non-fatal"}
+{"file": "crates/walle-daemon/src/lib.rs", "reason": "review daemon loop orchestration and ban writeback integration"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "verify stable structured SSH follow-loop logs"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "verify detector orchestration stays separate from runtime enforcement"}
