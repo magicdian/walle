@@ -37,7 +37,6 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "04-13-real-bpf-map-runtime-backend",
     "04-13-ban-lifecycle-management",
     "04-13-ssh-follow-service-loop",
     "04-13-icmp-dataplane-enforcement",
