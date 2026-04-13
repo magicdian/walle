@@ -95,3 +95,35 @@ Committed real XDP attach/runtime backend work, archived the completed loader/ma
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: ICMP dataplane enforcement validated on real host
+
+**Date**: 2026-04-13
+**Task**: ICMP dataplane enforcement validated on real host
+
+### Summary
+
+Switched icmp_rules to a verifier-safe hash lookup, reset stale pinned maps on attach, added bpftool payload-rule helpers, and validated that plain ping fails while the matching payload ping succeeds on the real host.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `25493bf` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
