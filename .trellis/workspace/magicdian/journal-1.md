@@ -225,3 +225,39 @@ Implemented live SSH source selection with journald follow preferred, inotify fi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: Runtime lifecycle, install flow, and release bundle
+
+**Date**: 2026-04-13
+**Task**: Runtime lifecycle, install flow, and release bundle
+
+### Summary
+
+Implemented live ban lifecycle commands, Linux install/uninstall flow, release bundle packaging, updated executable backend specs, and archived the related roadmap tasks.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3f9f469` | (see git log) |
+| `eb7d5a0` | (see git log) |
+| `ee5708b` | (see git log) |
+| `1c0f054` | (see git log) |
+| `470f317` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
