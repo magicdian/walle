@@ -1,0 +1,7 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Detector/source changes must follow backend ownership boundaries"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "Implementation must match detector-in-user-space and event-driven preference"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "SSH ingestion changes must preserve typed detector errors"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Live ingestion startup and fallback logs must stay structured and not chatty"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Keep detector logic separate from XDP enforcement and justify new dependencies"}

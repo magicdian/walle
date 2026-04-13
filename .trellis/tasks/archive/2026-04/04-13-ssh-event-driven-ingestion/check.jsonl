@@ -1,0 +1,5 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review layering and test coverage for source selection"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Review typed fallback and unsupported-mode behavior"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Review startup mode logs and quiet idle behavior"}
