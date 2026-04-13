@@ -1,0 +1,4 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify explicit runtime boundaries, no hidden state regressions, and user-visible errors"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "Cross-check documented crate responsibilities against the unified binary design"}

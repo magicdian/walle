@@ -1,0 +1,8 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Crate boundary and entrypoint ownership for unified binary refactor"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Binary boundary error rendering and typed runtime errors for run/reload commands"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Startup and single-instance conflict logs should follow structured logging guidance"}
+{"file": "README.md", "reason": "User-facing binary names and quick-start commands need to match the new contract"}
+{"file": "crates/walle-daemon/src/lib.rs", "reason": "Runtime/service logic boundary and startup path to keep as library code"}
+{"file": "crates/walle-cli/src/main.rs", "reason": "Existing CLI command tree, run path, and binary entrypoint to unify as walle"}
