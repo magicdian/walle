@@ -1,0 +1,51 @@
+{
+  "id": "real-xdp-runtime-roadmap",
+  "name": "real-xdp-runtime-roadmap",
+  "title": "Implement real XDP runtime roadmap",
+  "description": "Track foundational dataplane, map backend, service lifecycle, and packaging work needed to move walle from scaffold to a runnable Linux firewall.",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "priority": "P1",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-13",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "04-13-real-bpf-map-runtime-backend",
+    "04-13-ban-lifecycle-management",
+    "04-13-ssh-follow-service-loop",
+    "04-13-icmp-dataplane-enforcement",
+    "04-13-linux-service-install-flow",
+    "04-13-distribution-install-strategy"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

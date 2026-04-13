@@ -1,0 +1,44 @@
+{
+  "id": "distribution-install-strategy",
+  "name": "distribution-install-strategy",
+  "title": "Define distribution and install strategy",
+  "description": "Track packaging, environment diagnostics, failure guidance, and CO-RE/BTF compatibility strategy.",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "priority": "P2",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-13",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-13-real-xdp-runtime-roadmap",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
