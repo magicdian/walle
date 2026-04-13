@@ -1,0 +1,6 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "review typed contracts and test coverage for GP core and adapter"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "review structured GP logs and stable fields"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "review GP boundary errors and fail-open behavior"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "review architecture fit for generic GP core and SSH-only v1 adapter"}
