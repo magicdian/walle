@@ -36,9 +36,7 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [
-    "04-13-distribution-install-strategy"
-  ],
+  "children": [],
   "parent": null,
   "relatedFiles": [],
   "notes": "",
