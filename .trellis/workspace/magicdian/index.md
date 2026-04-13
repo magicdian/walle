@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 7
+- **Total Sessions**: 8
 - **Last Active**: 2026-04-13
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~263 | Active |
+| `journal-1.md` | ~296 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits |
 |---|------|-------|---------|
+| 8 | 2026-04-13 | Add GP core framework and SSH adapter | `d45e775`, `98b7bc9` |
 | 7 | 2026-04-13 | Runtime lifecycle, install flow, and release bundle | `3f9f469`, `eb7d5a0`, `ee5708b`, `1c0f054`, `470f317` |
 | 6 | 2026-04-13 | Prefer event-driven SSH ingestion | `98e3515`, `2f32ebd` |
 | 5 | 2026-04-13 | Multi-interface status and config-driven logging | `440ced0`, `7cb0979` |

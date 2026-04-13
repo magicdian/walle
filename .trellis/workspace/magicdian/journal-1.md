@@ -261,3 +261,36 @@ Implemented live ban lifecycle commands, Linux install/uninstall flow, release b
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: Add GP core framework and SSH adapter
+
+**Date**: 2026-04-13
+**Task**: Add GP core framework and SSH adapter
+
+### Summary
+
+Added a generic GP core with SSH adapter integration, fail-open outcomes, policy/config support, tests, and backend code-spec updates.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d45e775` | (see git log) |
+| `98b7bc9` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
