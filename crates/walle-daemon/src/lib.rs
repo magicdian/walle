@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,7 +19,7 @@ use crate::detector::{
     SshBanDecision, SshDetectorService, SshFailureEvent, SshIngestSummary, SshLogIngestor,
     SshResolvedLogSource,
 };
-pub use crate::error::DaemonError;
+pub use crate::error::{DaemonError, RuntimeLockError};
 use crate::logging::format_unix_timestamp_secs;
 use crate::runtime::{
     EnvironmentReport, RuntimeController, RuntimeSnapshot, log_environment_report,
@@ -26,6 +29,7 @@ pub use crate::xdp::XdpError;
 use crate::xdp::{XdpAttachment, maybe_attach};
 
 const DEFAULT_SSH_POLL_INTERVAL_MS: u64 = 1_000;
+const DEFAULT_RUNTIME_LOCK_PATH: &str = "/tmp/walle.lock";
 
 #[derive(Clone, Debug)]
 pub struct DaemonOptions {
@@ -74,6 +78,12 @@ pub struct WalleDaemon {
     options: DaemonOptions,
 }
 
+#[derive(Debug)]
+pub struct RuntimeInstanceLock {
+    path: PathBuf,
+    file: File,
+}
+
 impl WalleDaemon {
     pub fn new(config: WalleConfig, options: DaemonOptions) -> Result<Self, DaemonError> {
         config.validate()?;
@@ -93,6 +103,7 @@ impl WalleDaemon {
     }
 
     pub fn run(&mut self) -> Result<(), DaemonError> {
+        let _instance_lock = RuntimeInstanceLock::acquire_default()?;
         self.startup()?;
 
         if self.should_run_follow_loop() {
@@ -315,6 +326,114 @@ impl WalleDaemon {
     }
 }
 
+impl RuntimeInstanceLock {
+    pub fn acquire_default() -> Result<Self, RuntimeLockError> {
+        Self::acquire(Path::new(DEFAULT_RUNTIME_LOCK_PATH))
+    }
+
+    fn acquire(path: &Path) -> Result<Self, RuntimeLockError> {
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(mut file) => {
+                    writeln!(file, "{}", process::id()).map_err(|source| {
+                        RuntimeLockError::Write {
+                            path: path.to_path_buf(),
+                            source,
+                        }
+                    })?;
+                    file.sync_all().map_err(|source| RuntimeLockError::Write {
+                        path: path.to_path_buf(),
+                        source,
+                    })?;
+
+                    info!(
+                        component = "daemon",
+                        event = "runtime_lock_acquired",
+                        lock_path = %path.display(),
+                        pid = process::id(),
+                        "acquired runtime lock"
+                    );
+
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                        file,
+                    });
+                }
+                Err(source) if source.kind() == ErrorKind::AlreadyExists => {
+                    let owner_pid = read_lock_owner_pid(path)?;
+                    if owner_pid.is_some_and(|pid| !process_is_alive(pid)) {
+                        warn!(
+                            component = "daemon",
+                            event = "runtime_lock_stale",
+                            lock_path = %path.display(),
+                            owner_pid = owner_pid
+                                .map(|pid| pid.to_string())
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            "removing stale runtime lock before retrying"
+                        );
+                        fs::remove_file(path).map_err(|source| RuntimeLockError::RemoveStale {
+                            path: path.to_path_buf(),
+                            source,
+                        })?;
+                        continue;
+                    }
+
+                    return Err(RuntimeLockError::AlreadyRunning {
+                        path: path.to_path_buf(),
+                        owner_pid,
+                    });
+                }
+                Err(source) => {
+                    return Err(RuntimeLockError::Create {
+                        path: path.to_path_buf(),
+                        source,
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl Drop for RuntimeInstanceLock {
+    fn drop(&mut self) {
+        let _ = self.file.sync_all();
+        if let Err(error) = fs::remove_file(&self.path)
+            && error.kind() != ErrorKind::NotFound
+        {
+            warn!(
+                component = "daemon",
+                event = "runtime_lock_release_failed",
+                lock_path = %self.path.display(),
+                error = %error,
+                "failed to release runtime lock"
+            );
+        }
+    }
+}
+
+fn read_lock_owner_pid(path: &Path) -> Result<Option<u32>, RuntimeLockError> {
+    let mut contents = String::new();
+    File::open(path)
+        .and_then(|mut file| file.read_to_string(&mut contents))
+        .map_err(|source| RuntimeLockError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    let owner_pid = contents.trim().parse::<u32>().ok();
+    Ok(owner_pid)
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
+}
+
 fn unix_timestamp_secs() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs(),
@@ -324,7 +443,12 @@ fn unix_timestamp_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SSH_POLL_INTERVAL_MS, DaemonOptions, WalleDaemon};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{DEFAULT_SSH_POLL_INTERVAL_MS, DaemonOptions, RuntimeInstanceLock, WalleDaemon};
     use walle_policy::WalleConfig;
 
     #[test]
@@ -372,5 +496,42 @@ mod tests {
         .expect("bounded foreground daemon should be constructible");
 
         assert!(daemon.should_run_follow_loop());
+    }
+
+    #[test]
+    fn runtime_lock_rejects_second_live_instance() {
+        let path = unique_test_lock_path("active");
+        let _guard = RuntimeInstanceLock::acquire(&path).expect("first lock should be acquired");
+
+        let error =
+            RuntimeInstanceLock::acquire(&path).expect_err("second lock should be rejected");
+
+        let message = error.to_string();
+        assert!(message.contains("another walle instance is already running"));
+        assert!(message.contains(path.to_string_lossy().as_ref()));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_lock_recovers_stale_pid_file() {
+        let path = unique_test_lock_path("stale");
+        fs::write(&path, "999999\n").expect("stale pid file should be written");
+
+        let _guard = RuntimeInstanceLock::acquire(&path).expect("stale lock should be recovered");
+
+        let contents = fs::read_to_string(&path).expect("lock file should remain present");
+        assert_eq!(contents.trim(), process::id().to_string());
+
+        let _ = fs::remove_file(path);
+    }
+
+    fn unique_test_lock_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("walle-{name}-{}-{nanos}.lock", process::id()))
     }
 }

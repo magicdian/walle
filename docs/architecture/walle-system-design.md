@@ -393,9 +393,9 @@ fixtures/
 Suggested crate responsibilities:
 
 * `walle-cli`
-  * clap-based CLI entrypoints
+  * clap-based CLI entrypoints for the user-facing `walle` binary
 * `walle-daemon`
-  * long-running detector and loader service
+  * long-running detector and loader runtime library
 * `walle-common`
   * shared plain data types used across crates
 * `walle-policy`

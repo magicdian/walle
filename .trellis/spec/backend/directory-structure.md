@@ -8,7 +8,7 @@
 
 `walle` should use a Rust workspace with clear crate boundaries between:
 
-* CLI entrypoints
+* a user-facing CLI binary
 * long-running daemon logic
 * shared policy and type definitions
 * eBPF/XDP program code
@@ -50,11 +50,11 @@ fixtures/
 Use these ownership rules:
 
 * `walle-cli`
-  * command parsing
+  * command parsing for the user-facing `walle` binary
   * output formatting
   * no packet-path business logic
 * `walle-daemon`
-  * service lifecycle
+  * runtime library for service lifecycle
   * detector pipelines
   * map synchronization
   * runtime orchestration
@@ -91,7 +91,7 @@ Prefer files organized by capability, not by framework artifact. For example, `d
 
 Current scaffold examples:
 
-* [`walle-cli main`](E:/coding/github_projects/walle/crates/walle-cli/src/main.rs): CLI-only entrypoint and command tree
-* [`walle-daemon lib`](E:/coding/github_projects/walle/crates/walle-daemon/src/lib.rs): daemon orchestration boundary
+* [`walle-cli main`](E:/coding/github_projects/walle/crates/walle-cli/src/main.rs): the user-facing `walle` binary entrypoint and command tree
+* [`walle-daemon lib`](E:/coding/github_projects/walle/crates/walle-daemon/src/lib.rs): runtime orchestration boundary kept outside CLI parsing
 * [`walle-daemon detector`](E:/coding/github_projects/walle/crates/walle-daemon/src/detector.rs): SSH detector module ownership
 * [`walle-ebpf lib`](E:/coding/github_projects/walle/crates/walle-ebpf/src/lib.rs): packet-path placeholder code

@@ -20,6 +20,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Run(RunArgs),
+    Reload,
     Status,
     VerifyEnv(VerifyEnvArgs),
     AccessMode(AccessModeArgs),
@@ -33,8 +34,6 @@ enum Command {
 struct RunArgs {
     #[arg(long)]
     interface: Option<String>,
-    #[arg(long, default_value_t = true)]
-    foreground: bool,
     #[arg(long)]
     xdp_object: Option<PathBuf>,
     #[arg(long)]
@@ -193,7 +192,8 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run(args) => run_daemon(args),
+        Command::Run(args) => run_command(args),
+        Command::Reload => reload_command(),
         Command::Status => show_status(),
         Command::VerifyEnv(args) => verify_environment(args),
         Command::AccessMode(args) => handle_access_mode(args.command),
@@ -204,12 +204,12 @@ fn run() -> Result<()> {
     }
 }
 
-fn run_daemon(args: RunArgs) -> Result<()> {
+fn run_command(args: RunArgs) -> Result<()> {
     let mut daemon = WalleDaemon::new(
         WalleConfig::default(),
         DaemonOptions {
             interface: args.interface,
-            foreground: args.foreground,
+            foreground: true,
             xdp_object: args.xdp_object,
             map_pin_path: args.map_pin_path,
             ssh_poll_interval_ms: args.ssh_poll_interval_ms,
@@ -218,12 +218,14 @@ fn run_daemon(args: RunArgs) -> Result<()> {
     )?;
 
     daemon.run()?;
-    if args.foreground {
-        println!("walle daemon exited after completing the requested SSH follow loop");
-    } else {
-        println!("walle daemon startup completed without entering the SSH follow loop");
-    }
+    println!("walle run exited after completing the requested SSH follow loop");
     Ok(())
+}
+
+fn reload_command() -> Result<()> {
+    anyhow::bail!(
+        "reload is reserved for future configuration reload support and is not implemented yet"
+    )
 }
 
 fn show_status() -> Result<()> {

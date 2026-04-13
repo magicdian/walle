@@ -1,3 +1,6 @@
+use std::io;
+use std::path::PathBuf;
+
 use thiserror::Error;
 use walle_policy::PolicyError;
 
@@ -13,6 +16,31 @@ pub enum DaemonError {
     SshIngest(#[from] SshIngestError),
     #[error("runtime operation failed: {0}")]
     Runtime(#[from] RuntimeError),
+    #[error("{0}")]
+    RuntimeLock(#[from] RuntimeLockError),
     #[error("XDP operation failed: {0}")]
     Xdp(#[from] XdpError),
+}
+
+#[derive(Debug, Error)]
+pub enum RuntimeLockError {
+    #[error(
+        "another walle instance is already running; pid={}; lock_path={}",
+        .owner_pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        .path.display()
+    )]
+    AlreadyRunning {
+        path: PathBuf,
+        owner_pid: Option<u32>,
+    },
+    #[error("failed to create runtime lock at {}: {source}", .path.display())]
+    Create { path: PathBuf, source: io::Error },
+    #[error("failed to read existing runtime lock at {}: {source}", .path.display())]
+    Read { path: PathBuf, source: io::Error },
+    #[error("failed to write runtime lock at {}: {source}", .path.display())]
+    Write { path: PathBuf, source: io::Error },
+    #[error("failed to remove stale runtime lock at {}: {source}", .path.display())]
+    RemoveStale { path: PathBuf, source: io::Error },
 }

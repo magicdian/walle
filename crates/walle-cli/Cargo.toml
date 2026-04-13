@@ -3,6 +3,10 @@ name = "walle-cli"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "walle"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

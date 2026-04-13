@@ -128,5 +128,5 @@ If a machine-readable API is introduced later, it should preserve stable error c
 Current scaffold examples:
 
 * [`walle-daemon error`](E:/coding/github_projects/walle/crates/walle-daemon/src/error.rs): daemon-owned typed error boundary
-* [`walle-daemon main`](E:/coding/github_projects/walle/crates/walle-daemon/src/main.rs): binary-boundary error rendering
+* [`walle-cli main`](E:/coding/github_projects/walle/crates/walle-cli/src/main.rs): binary-boundary error rendering for the unified `walle` executable
 * [`walle-policy errors`](E:/coding/github_projects/walle/crates/walle-policy/src/lib.rs): validation-focused typed errors

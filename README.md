@@ -6,8 +6,8 @@ eBPF based firewall.
 
 This repository now contains the phase-1 Rust workspace scaffold for:
 
-* `walle-cli`
-* `walle-daemon`
+* `walle` (built from the `walle-cli` crate)
+* `walle-daemon` runtime library
 * `walle-common`
 * `walle-policy`
 * `walle-ebpf`
@@ -21,7 +21,8 @@ The repository now includes a real XDP program target and an aya-based attach pa
 
 ```bash
 cargo run -p xtask -- build-ebpf
-cargo run -p walle-cli -- run --interface eth0
+cargo build -p walle-cli
+./target/debug/walle run --interface eth0
 ```
 
 `build-ebpf` now produces the optimized release BPF object by default. Use `--debug` only when you explicitly want the debug artifact.
