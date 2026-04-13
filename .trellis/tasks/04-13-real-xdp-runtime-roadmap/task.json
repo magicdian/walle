@@ -38,7 +38,6 @@
   "subtasks": [],
   "children": [
     "04-13-ban-lifecycle-management",
-    "04-13-icmp-dataplane-enforcement",
     "04-13-linux-service-install-flow",
     "04-13-distribution-install-strategy"
   ],
