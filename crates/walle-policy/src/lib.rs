@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use walle_common::{
-    AccessMode, ICMP_RULE_PAYLOAD_CAPACITY, IcmpMatchType, IcmpMode, RuntimeConfig,
+    AccessMode, IcmpMatchType, IcmpMode, RuntimeConfig, ICMP_RULE_PAYLOAD_CAPACITY,
 };
 
 pub use walle_common::IcmpRule;
@@ -189,6 +189,81 @@ impl Default for AccessPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpStrategyKind {
+    #[default]
+    Observe,
+    Degrade,
+    Contain,
+}
+
+impl GpStrategyKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Degrade => "degrade",
+            Self::Contain => "contain",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpTriggerMode {
+    SignalObserved,
+    DecisionEmitted,
+    #[default]
+    All,
+}
+
+impl GpTriggerMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SignalObserved => "signal_observed",
+            Self::DecisionEmitted => "decision_emitted",
+            Self::All => "all",
+        }
+    }
+
+    #[must_use]
+    pub const fn matches_signal_observed(self) -> bool {
+        matches!(self, Self::SignalObserved | Self::All)
+    }
+
+    #[must_use]
+    pub const fn matches_decision_emitted(self) -> bool {
+        matches!(self, Self::DecisionEmitted | Self::All)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpPolicy {
+    pub enabled: bool,
+    #[serde(default)]
+    pub strategy: GpStrategyKind,
+    #[serde(default)]
+    pub trigger_mode: GpTriggerMode,
+}
+
+impl Default for GpPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strategy: GpStrategyKind::Observe,
+            trigger_mode: GpTriggerMode::All,
+        }
+    }
+}
+
+impl GpPolicy {
+    fn validate(&self) -> Result<(), PolicyError> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshProtectionPolicy {
     pub enabled: bool,
@@ -198,6 +273,8 @@ pub struct SshProtectionPolicy {
     pub log_source_mode: SshLogSourceMode,
     #[serde(default)]
     pub log_file_paths: Vec<String>,
+    #[serde(default)]
+    pub gp: GpPolicy,
 }
 
 impl Default for SshProtectionPolicy {
@@ -209,6 +286,7 @@ impl Default for SshProtectionPolicy {
             ban_duration_secs: 900,
             log_source_mode: SshLogSourceMode::Auto,
             log_file_paths: Vec::new(),
+            gp: GpPolicy::default(),
         }
     }
 }
@@ -236,6 +314,8 @@ impl SshProtectionPolicy {
                 return Err(PolicyError::EmptySshLogPath);
             }
         }
+
+        self.gp.validate()?;
 
         Ok(())
     }
@@ -451,8 +531,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        DEFAULT_CONFIG_PATH, DetectorPolicies, GlobalPolicy, IcmpAllowRule, InterfaceFilters,
-        InterfacePolicy, LogLevel, PolicyError, SshLogSourceMode, SshProtectionPolicy, WalleConfig,
+        DetectorPolicies, GlobalPolicy, GpPolicy, GpStrategyKind, GpTriggerMode, IcmpAllowRule,
+        InterfaceFilters, InterfacePolicy, LogLevel, PolicyError, SshLogSourceMode,
+        SshProtectionPolicy, WalleConfig, DEFAULT_CONFIG_PATH,
     };
     use walle_common::{AccessMode, IcmpMatchType, IcmpMode};
 
@@ -463,6 +544,9 @@ mod tests {
         assert_eq!(config.version, 1);
         assert!(config.interfaces().is_empty());
         assert_eq!(config.logging_policy().level, LogLevel::Info);
+        assert!(!config.ssh_policy().gp.enabled);
+        assert_eq!(config.ssh_policy().gp.strategy, GpStrategyKind::Observe);
+        assert_eq!(config.ssh_policy().gp.trigger_mode, GpTriggerMode::All);
     }
 
     #[test]
@@ -479,9 +563,20 @@ mod tests {
             ban_duration_secs: 0,
             log_source_mode: SshLogSourceMode::Auto,
             log_file_paths: Vec::new(),
+            gp: GpPolicy::default(),
         };
 
         assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn gp_trigger_mode_match_helpers_cover_both_trigger_boundaries() {
+        assert!(GpTriggerMode::SignalObserved.matches_signal_observed());
+        assert!(!GpTriggerMode::SignalObserved.matches_decision_emitted());
+        assert!(GpTriggerMode::DecisionEmitted.matches_decision_emitted());
+        assert!(!GpTriggerMode::DecisionEmitted.matches_signal_observed());
+        assert!(GpTriggerMode::All.matches_signal_observed());
+        assert!(GpTriggerMode::All.matches_decision_emitted());
     }
 
     #[test]
@@ -622,6 +717,11 @@ ban_duration_secs = 900
 log_source_mode = "auto"
 log_file_paths = []
 
+[detectors.ssh.gp]
+enabled = true
+strategy = "contain"
+trigger_mode = "decision_emitted"
+
 [policy.access]
 mode = "blacklist_only"
 allowlist = []
@@ -651,6 +751,12 @@ enabled = true
         assert_eq!(
             config.interfaces()[0].filters.icmp.allow_rules[0].payload_hex,
             "09070108"
+        );
+        assert!(config.ssh_policy().gp.enabled);
+        assert_eq!(config.ssh_policy().gp.strategy, GpStrategyKind::Contain);
+        assert_eq!(
+            config.ssh_policy().gp.trigger_mode,
+            GpTriggerMode::DecisionEmitted
         );
 
         let _ = fs::remove_file(path);

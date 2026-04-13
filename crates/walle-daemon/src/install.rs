@@ -3,8 +3,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use thiserror::Error;
 use crate::xdp::default_object_path;
+use thiserror::Error;
 
 const INSTALL_BIN_RELATIVE_PATH: &str = "usr/local/bin/walle";
 const INSTALL_OBJECT_RELATIVE_PATH: &str = "usr/local/lib/walle/walle-ebpf";
@@ -174,7 +174,10 @@ fn install_with_sources(
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_xdp_object(explicit: Option<&Path>, current_executable: &Path) -> Result<PathBuf, InstallError> {
+fn resolve_xdp_object(
+    explicit: Option<&Path>,
+    current_executable: &Path,
+) -> Result<PathBuf, InstallError> {
     if let Some(path) = explicit {
         if path.exists() {
             return Ok(path.to_path_buf());
@@ -216,7 +219,9 @@ fn ensure_install_privileges(root: &Path) -> Result<(), InstallError> {
     if euid == 0 {
         Ok(())
     } else {
-        Err(InstallError::MissingPrivileges { effective_uid: euid })
+        Err(InstallError::MissingPrivileges {
+            effective_uid: euid,
+        })
     }
 }
 
@@ -306,6 +311,11 @@ fn default_config_template() -> &'static str {
         "log_source_mode = \"auto\"\n",
         "log_file_paths = []\n",
         "\n",
+        "[detectors.ssh.gp]\n",
+        "enabled = false\n",
+        "strategy = \"observe\"\n",
+        "trigger_mode = \"all\"\n",
+        "\n",
         "[policy.access]\n",
         "mode = \"blacklist_only\"\n",
         "allowlist = []\n",
@@ -371,9 +381,7 @@ pub enum InstallError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error(
-        "failed to copy '{from_path}' to '{destination}': {source_error}"
-    )]
+    #[error("failed to copy '{from_path}' to '{destination}': {source_error}")]
     CopyFile {
         from_path: PathBuf,
         destination: PathBuf,
@@ -397,10 +405,20 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        INSTALL_BIN_RELATIVE_PATH, INSTALL_CONFIG_RELATIVE_PATH, INSTALL_OBJECT_RELATIVE_PATH,
-        INSTALL_SCRIPT_RELATIVE_PATH, INSTALL_UNIT_RELATIVE_PATH, InstallOptions, ServiceManager,
-        UninstallOptions, install_with_sources, join_root, uninstall,
+        default_config_template, install_with_sources, join_root, uninstall, InstallOptions,
+        ServiceManager, UninstallOptions, INSTALL_BIN_RELATIVE_PATH, INSTALL_CONFIG_RELATIVE_PATH,
+        INSTALL_OBJECT_RELATIVE_PATH, INSTALL_SCRIPT_RELATIVE_PATH, INSTALL_UNIT_RELATIVE_PATH,
     };
+
+    #[test]
+    fn default_config_template_includes_disabled_gp_block() {
+        let template = default_config_template();
+
+        assert!(template.contains("[detectors.ssh.gp]"));
+        assert!(template.contains("enabled = false"));
+        assert!(template.contains("strategy = \"observe\""));
+        assert!(template.contains("trigger_mode = \"all\""));
+    }
 
     fn temp_root(name: &str) -> PathBuf {
         let nanos = SystemTime::now()

@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod detector;
 pub mod error;
+pub mod gp;
 pub mod install;
 pub mod logging;
 pub mod runtime;
@@ -20,6 +21,7 @@ use crate::detector::{
     SshLiveSourceMode, SshLogIngestor, SshResolvedLogSource,
 };
 pub use crate::error::{DaemonError, RuntimeLockError};
+use crate::gp::{GpAdapterRequest, GpExecutionOutcome, GpExecutor, SshGpRequest};
 use crate::logging::format_unix_timestamp_secs;
 use crate::runtime::{
     BanRecord, EnvironmentReport, RuntimeBackendKind, RuntimeController, RuntimeSnapshot,
@@ -105,6 +107,7 @@ pub struct InterfaceBanSnapshot {
 
 pub struct WalleDaemon {
     detector: SshDetectorService,
+    gp_executor: GpExecutor,
     ssh_live_ingestor: SshLiveIngestor,
     ssh_poll_ingestor: SshLogIngestor,
     runtimes: Vec<InterfaceRuntime>,
@@ -129,6 +132,7 @@ impl WalleDaemon {
         config.validate()?;
 
         let detector = SshDetectorService::new(config.ssh_policy().clone());
+        let gp_executor = GpExecutor::new(config.ssh_policy().gp.clone());
         let ssh_live_ingestor = detector.create_live_ingestor();
         let ssh_poll_ingestor = detector.create_ingestor();
         let selected_interfaces = select_interfaces(&config, options.interface.as_deref())?;
@@ -143,6 +147,7 @@ impl WalleDaemon {
 
         Ok(Self {
             detector,
+            gp_executor,
             ssh_live_ingestor,
             ssh_poll_ingestor,
             runtimes,
@@ -206,6 +211,7 @@ impl WalleDaemon {
         }
 
         self.detector.log_startup();
+        self.gp_executor.log_startup();
         self.ssh_live_ingestor.log_startup();
         let observed_at_secs = unix_timestamp_secs();
         for runtime in &mut self.runtimes {
@@ -220,6 +226,7 @@ impl WalleDaemon {
             event = "startup_complete",
             compatible = environment.is_compatible(),
             detector = %self.detector.describe(),
+            gp = %self.gp_executor.describe(),
             interfaces = self.runtimes.len(),
             "daemon runtime is ready"
         );
@@ -433,11 +440,7 @@ impl WalleDaemon {
         line: &str,
         observed_at_secs: u64,
     ) -> Result<Option<SshBanDecision>, DaemonError> {
-        let decision = self.detector.process_log_line(line, observed_at_secs);
-
-        if let Some(ban) = decision.clone() {
-            self.apply_ssh_ban_to_all(ban)?;
-        }
+        let (_, decision) = self.process_single_ssh_line(line, observed_at_secs)?;
 
         Ok(decision)
     }
@@ -457,10 +460,19 @@ impl WalleDaemon {
         step_secs: u64,
     ) -> Result<SshIngestSummary, DaemonError> {
         let lines = SshLogIngestor::read_all_lines_from_file(path.into())?;
-        let summary = self.detector.replay_lines(lines, start_at_secs, step_secs);
+        let mut summary = SshIngestSummary::default();
 
-        for decision in &summary.bans {
-            self.apply_ssh_ban_to_all(decision.clone())?;
+        for (index, line) in lines.into_iter().enumerate() {
+            let observed_at_secs =
+                start_at_secs.saturating_add((index as u64).saturating_mul(step_secs));
+            summary.lines_read = summary.lines_read.saturating_add(1);
+            let (event, decision) = self.process_single_ssh_line(&line, observed_at_secs)?;
+            if event.is_some() {
+                summary.matched_failures = summary.matched_failures.saturating_add(1);
+            }
+            if let Some(decision) = decision {
+                summary.bans.push(decision);
+            }
         }
 
         Ok(summary)
@@ -541,13 +553,63 @@ impl WalleDaemon {
         lines: Vec<String>,
         observed_at_secs: u64,
     ) -> Result<SshIngestSummary, DaemonError> {
-        let summary = self.detector.replay_lines(lines, observed_at_secs, 1);
+        let mut summary = SshIngestSummary::default();
 
-        for decision in &summary.bans {
-            self.apply_ssh_ban_to_all(decision.clone())?;
+        for (index, line) in lines.into_iter().enumerate() {
+            let line_observed_at_secs =
+                observed_at_secs.saturating_add((index as u64).saturating_mul(1));
+            summary.lines_read = summary.lines_read.saturating_add(1);
+            let (event, decision) = self.process_single_ssh_line(&line, line_observed_at_secs)?;
+            if event.is_some() {
+                summary.matched_failures = summary.matched_failures.saturating_add(1);
+            }
+            if let Some(decision) = decision {
+                summary.bans.push(decision);
+            }
         }
 
         Ok(summary)
+    }
+
+    fn process_single_ssh_line(
+        &mut self,
+        line: &str,
+        observed_at_secs: u64,
+    ) -> Result<(Option<SshFailureEvent>, Option<SshBanDecision>), DaemonError> {
+        let event = self.detector.inspect_log_line(line);
+
+        if let Some(event) = event.clone() {
+            self.execute_ssh_gp_for_failure(&event, observed_at_secs);
+            let decision = self.detector.observe_failure(event.ip, observed_at_secs);
+
+            if let Some(ban) = decision.clone() {
+                self.apply_ssh_ban_to_all(ban.clone())?;
+                self.execute_ssh_gp_for_decision(&ban);
+            }
+
+            Ok((Some(event), decision))
+        } else {
+            Ok((None, None))
+        }
+    }
+
+    fn execute_ssh_gp_for_failure(
+        &self,
+        event: &SshFailureEvent,
+        observed_at_secs: u64,
+    ) -> GpExecutionOutcome {
+        self.gp_executor
+            .execute(GpAdapterRequest::Ssh(SshGpRequest::from_failure_event(
+                event,
+                observed_at_secs,
+            )))
+    }
+
+    fn execute_ssh_gp_for_decision(&self, decision: &SshBanDecision) -> GpExecutionOutcome {
+        self.gp_executor
+            .execute(GpAdapterRequest::Ssh(SshGpRequest::from_ban_decision(
+                decision,
+            )))
     }
 
     fn apply_ssh_ban_to_all(&mut self, decision: SshBanDecision) -> Result<(), DaemonError> {
@@ -734,9 +796,12 @@ mod tests {
         DEFAULT_SSH_POLL_INTERVAL_MS, DaemonOptions, RuntimeInstanceLock, WalleDaemon,
         select_interfaces,
     };
+    use crate::detector::{SshBanDecision, SshFailureEvent, SshFailureReason};
+    use crate::gp::GpExecutionStatus;
     use walle_common::{IcmpMatchType, IcmpMode};
     use walle_policy::{
-        IcmpAllowRule, IcmpPolicy, InterfaceFilters, InterfacePolicy, WalleConfig, XdpMode,
+        GpPolicy, GpStrategyKind, GpTriggerMode, IcmpAllowRule, IcmpPolicy, InterfaceFilters,
+        InterfacePolicy, WalleConfig, XdpMode,
     };
 
     #[test]
@@ -886,6 +951,82 @@ mod tests {
     }
 
     #[test]
+    fn ssh_gp_pre_ban_trigger_uses_signal_observed_boundary() {
+        let daemon = WalleDaemon::new(
+            config_with_gp(GpPolicy {
+                enabled: true,
+                strategy: GpStrategyKind::Observe,
+                trigger_mode: GpTriggerMode::SignalObserved,
+            }),
+            DaemonOptions::default(),
+        )
+        .expect("GP-enabled config should be accepted");
+
+        let outcome = daemon.execute_ssh_gp_for_failure(
+            &SshFailureEvent {
+                ip: "198.51.100.10".parse().expect("test IP should parse"),
+                reason: SshFailureReason::FailedPassword,
+            },
+            10,
+        );
+
+        assert_eq!(outcome.status, GpExecutionStatus::Observed);
+    }
+
+    #[test]
+    fn ssh_gp_post_ban_trigger_is_filtered_when_only_pre_ban_is_enabled() {
+        let daemon = WalleDaemon::new(
+            config_with_gp(GpPolicy {
+                enabled: true,
+                strategy: GpStrategyKind::Observe,
+                trigger_mode: GpTriggerMode::SignalObserved,
+            }),
+            DaemonOptions::default(),
+        )
+        .expect("GP-enabled config should be accepted");
+
+        let outcome = daemon.execute_ssh_gp_for_decision(&SshBanDecision {
+            ip: "198.51.100.10".parse().expect("test IP should parse"),
+            matched_failures: 5,
+            observed_at_secs: 15,
+            expires_at_secs: 60,
+        });
+
+        assert_eq!(outcome.status, GpExecutionStatus::TriggerFiltered);
+    }
+
+    #[test]
+    fn ssh_ban_flow_remains_active_when_gp_strategy_is_unavailable() {
+        let mut daemon = WalleDaemon::new(
+            config_with_gp(GpPolicy {
+                enabled: true,
+                strategy: GpStrategyKind::Contain,
+                trigger_mode: GpTriggerMode::All,
+            }),
+            DaemonOptions::default(),
+        )
+        .expect("GP-enabled config should be accepted");
+
+        for observed_at_secs in 1..=5 {
+            daemon
+                .process_ssh_log_line(
+                    "Apr 13 12:00:00 host sshd[123]: Failed password for root from 198.51.100.42 port 22 ssh2",
+                    observed_at_secs,
+                )
+                .expect("SSH line processing should succeed even when GP fails open");
+        }
+
+        let snapshot = daemon.snapshot();
+        assert_eq!(snapshot.totals.deny_v4_entries, 2);
+        assert!(
+            snapshot
+                .interfaces
+                .iter()
+                .all(|interface| interface.deny_v4_entries >= 1)
+        );
+    }
+
+    #[test]
     fn runtime_lock_rejects_second_live_instance() {
         let path = unique_test_lock_path("active");
         let _guard = RuntimeInstanceLock::acquire(&path).expect("first lock should be acquired");
@@ -947,6 +1088,12 @@ mod tests {
                 },
             },
         ];
+        config
+    }
+
+    fn config_with_gp(gp: GpPolicy) -> WalleConfig {
+        let mut config = config_with_interfaces();
+        config.detectors.ssh.gp = gp;
         config
     }
 }

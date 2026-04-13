@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use walle_common::{AccessMode, IcmpMode};
-use walle_daemon::install::{InstallOptions, uninstall, UninstallOptions};
+use walle_daemon::install::{uninstall, InstallOptions, UninstallOptions};
 use walle_daemon::logging::{format_unix_timestamp_secs, init_tracing};
 use walle_daemon::{DaemonOptions, WalleDaemon};
 use walle_policy::{IcmpAllowRule, LogLevel, WalleConfig};
@@ -505,13 +505,16 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
         SshCommand::PolicyShow => {
             let config = load_default_config("walle ssh policy-show")?;
             println!(
-                "ssh policy: enabled={}, threshold={}, window_secs={}, ban_duration_secs={}, source_mode={:?}, log_paths={:?}",
+                "ssh policy: enabled={}, threshold={}, window_secs={}, ban_duration_secs={}, source_mode={:?}, log_paths={:?}, gp_enabled={}, gp_strategy={}, gp_trigger_mode={}",
                 config.ssh_policy().enabled,
                 config.ssh_policy().failure_threshold,
                 config.ssh_policy().window_secs,
                 config.ssh_policy().ban_duration_secs,
                 config.ssh_policy().log_source_mode,
-                config.ssh_policy().log_file_paths
+                config.ssh_policy().log_file_paths,
+                config.ssh_policy().gp.enabled,
+                config.ssh_policy().gp.strategy.as_str(),
+                config.ssh_policy().gp.trigger_mode.as_str()
             );
         }
         SshCommand::Sources => {
