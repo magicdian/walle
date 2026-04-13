@@ -159,3 +159,36 @@ Unified the user-facing binary as walle, removed the standalone daemon executabl
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: Multi-interface status and config-driven logging
+
+**Date**: 2026-04-13
+**Task**: Multi-interface status and config-driven logging
+
+### Summary
+
+Added multi-interface status reporting, config-driven logging levels, and archived the config-layout-and-interface-policy task.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `440ced0` | (see git log) |
+| `7cb0979` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
