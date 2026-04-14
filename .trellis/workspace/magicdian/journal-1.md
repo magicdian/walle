@@ -425,3 +425,41 @@ Completed and documented the ssh-gp-shell-realism task, including richer synthet
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: Graceful shutdown cleanup for walle run
+
+**Date**: 2026-04-14
+**Task**: Graceful shutdown cleanup for walle run
+
+### Summary
+
+Added graceful SIGINT/SIGTERM shutdown for walle run, explicit runtime cleanup, regression tests, and spec updates.
+
+### Main Changes
+
+| Area | Description |
+|------|-------------|
+| Runtime shutdown | Converted foreground `walle run` shutdown into an explicit signal-driven control path so `Ctrl+C` returns cleanly instead of relying on abrupt process death. |
+| Resource cleanup | Ensured managed XDP/tc resources and pinned maps are released during graceful teardown, with lifecycle logging for shutdown request and completion. |
+| Verification | Added regression coverage for follow-loop shutdown propagation and managed pin cleanup; workspace tests passed after the change. |
+| Knowledge capture | Updated backend error-handling, backend quality, and cross-layer thinking guides to document the shutdown contract and this bug class. |
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9f8fe2a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
