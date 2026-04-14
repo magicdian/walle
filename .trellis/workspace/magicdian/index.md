@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 15
+- **Total Sessions**: 16
 - **Last Active**: 2026-04-14
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~531 | Active |
+| `journal-1.md` | ~563 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits |
 |---|------|-------|---------|
+| 16 | 2026-04-14 | Harden XDP fallback and SSH ingestion startup | `353a504` |
 | 15 | 2026-04-14 | Fix distro eBPF lookup and XDP fallback | `9944db9`, `bf6c922` |
 | 14 | 2026-04-14 | SSH GP interactive shell stress test | `782ef52`, `d27864f` |
 | 13 | 2026-04-14 | Graceful shutdown cleanup for walle run | `9f8fe2a` |

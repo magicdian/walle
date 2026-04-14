@@ -529,3 +529,35 @@ Aligned install/run eBPF object lookup with release bundle layout, added driver-
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: Harden XDP fallback and SSH ingestion startup
+
+**Date**: 2026-04-14
+**Task**: Harden XDP fallback and SSH ingestion startup
+
+### Summary
+
+Fixed XDP driver->skb fallback classification for EINVAL, improved journald follow startup using cursor-based resume, and updated backend/cross-layer specs to capture that journald follow is not always the lowest-latency source and log_files mode may be preferred on some hosts.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `353a504` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
