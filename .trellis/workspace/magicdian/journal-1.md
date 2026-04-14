@@ -392,3 +392,36 @@ Reviewed the remaining uncommitted Rust workspace changes, confirmed they were f
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: SSH jail shell realism closeout
+
+**Date**: 2026-04-14
+**Task**: SSH jail shell realism closeout
+
+### Summary
+
+Completed and documented the ssh-gp-shell-realism task, including richer synthetic shell behavior, backend code-spec updates, task archival, and session recording.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4f8abd9` | (see git log) |
+| `af29433` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

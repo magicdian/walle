@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 11
+- **Total Sessions**: 12
 - **Last Active**: 2026-04-14
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~394 | Active |
+| `journal-1.md` | ~427 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits |
 |---|------|-------|---------|
+| 12 | 2026-04-14 | SSH jail shell realism closeout | `4f8abd9`, `af29433` |
 | 11 | 2026-04-14 | Finalize rustfmt cleanup after shell realism work | `fd0b601` |
 | 10 | 2026-04-14 | Improve sshjail virtual shell realism | `5aa94df`, `b76abc7` |
 | 9 | 2026-04-14 | SSH jail containment and invalid-user fast ban | `8377ff69537efaca12153bbf96e9cc2d95eec585` |
