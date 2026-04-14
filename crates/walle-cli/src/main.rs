@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{self, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -8,6 +8,11 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use walle_common::{AccessMode, IcmpMode};
 use walle_daemon::install::{InstallOptions, UninstallOptions, uninstall};
 use walle_daemon::logging::{format_unix_timestamp_secs, init_tracing};
+use walle_daemon::ssh_overlay::{
+    AuthorizedKeysTrapRequest, evaluate_authorized_keys_trap, gp_containment_enabled,
+    render_nsswitch_config_fragment, render_pam_config_fragment, render_sshd_config_fragment,
+};
+use walle_daemon::sshjail::{run_local_trap_command, run_local_trap_login};
 use walle_daemon::{DaemonOptions, DaemonRunOutcome, WalleDaemon};
 use walle_policy::{IcmpAllowRule, LogLevel, WalleConfig};
 
@@ -145,10 +150,40 @@ enum SshCommand {
         #[arg(long, default_value_t = 1)]
         step_secs: u64,
     },
+    Overlay {
+        #[command(subcommand)]
+        command: SshOverlayCommand,
+    },
     Gp {
         #[command(subcommand)]
         command: SshGpCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SshOverlayCommand {
+    AuthorizedKeys {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        uid: Option<u32>,
+        #[arg(long)]
+        home: Option<String>,
+        #[arg(long = "key-type")]
+        key_type: String,
+        #[arg(long = "key-base64")]
+        key_base64: String,
+        #[arg(long)]
+        fingerprint: String,
+    },
+    TrapShell {
+        #[arg(long)]
+        token: String,
+    },
+    TrapLogin,
+    PrintSshdConfig,
+    PrintNsswitchConfig,
+    PrintPamConfig,
 }
 
 #[derive(Debug, Subcommand)]
@@ -256,6 +291,9 @@ fn configured_log_level(command: &Command) -> LogLevel {
         Command::Install(_) | Command::Uninstall(_) => LogLevel::Info,
         Command::Reload => LogLevel::Info,
         Command::Ban(_) | Command::Allow(_) | Command::Icmp(_) => LogLevel::Info,
+        Command::Ssh(SshArgs {
+            command: SshCommand::Overlay { .. },
+        }) => LogLevel::Error,
         _ => WalleConfig::load_default()
             .map(|config| config.logging_policy().level)
             .unwrap_or(LogLevel::Info),
@@ -271,13 +309,34 @@ fn install_command(args: InstallArgs) -> Result<()> {
 
     println!("binary_path: {}", report.binary_path.display());
     println!("xdp_object_path: {}", report.object_path.display());
+    println!("nss_module_path: {}", report.nss_module_path.display());
+    println!("pam_module_path: {}", report.pam_module_path.display());
     println!("config_path: {}", report.config_path.display());
+    println!(
+        "sshd_overlay_sample_path: {}",
+        report.ssh_overlay_sample_path.display()
+    );
+    println!(
+        "nsswitch_overlay_sample_path: {}",
+        report.nss_overlay_sample_path.display()
+    );
+    println!(
+        "trap_login_shell_path: {}",
+        report.trap_login_shell_path.display()
+    );
+    println!(
+        "pam_overlay_sample_path: {}",
+        report.pam_overlay_sample_path.display()
+    );
     println!("config_created: {}", report.config_created);
     println!("service_manager: {}", report.service_manager.as_str());
     println!("service_path: {}", report.service_path.display());
     println!(
-        "next_step: review {} and start the service or fallback runner",
-        walle_policy::DEFAULT_CONFIG_PATH
+        "next_step: run ldconfig, review {}, merge {} into sshd_config, {} into /etc/nsswitch.conf, and {} into /etc/pam.d/sshd, then start the service or fallback runner",
+        walle_policy::DEFAULT_CONFIG_PATH,
+        report.ssh_overlay_sample_path.display(),
+        report.nss_overlay_sample_path.display(),
+        report.pam_overlay_sample_path.display()
     );
 
     Ok(())
@@ -545,7 +604,7 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
         SshCommand::PolicyShow => {
             let config = load_default_config("walle ssh policy-show")?;
             println!(
-                "ssh policy: enabled={}, threshold={}, window_secs={}, ban_duration_secs={}, invalid_user_force_ban_enabled={}, source_mode={:?}, log_paths={:?}, gp_enabled={}, gp_strategy={}, gp_trigger_mode={}, sshjail_protected_port={}, sshjail_listen_port={}, sshjail_max_sessions={}, sshjail_idle_timeout_secs={}, sshjail_max_session_duration_secs={}, sshjail_audit_dir={}, sshjail_hostname_strategy={:?}, sshjail_fake_hostname={:?}",
+                "ssh policy: enabled={}, threshold={}, window_secs={}, ban_duration_secs={}, invalid_user_force_ban_enabled={}, source_mode={:?}, log_paths={:?}, gp_enabled={}, gp_strategy={}, gp_trigger_mode={}, sshjail_protected_port={}, sshjail_listen_port={}, sshjail_max_sessions={}, sshjail_idle_timeout_secs={}, sshjail_max_session_duration_secs={}, sshjail_root_dir={}, sshjail_static_blacklist_keys_path={}, sshjail_hostname_strategy={:?}, sshjail_fake_hostname={:?}",
                 config.ssh_policy().enabled,
                 config.ssh_policy().failure_threshold,
                 config.ssh_policy().window_secs,
@@ -561,7 +620,8 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
                 config.ssh_policy().gp.sshjail.max_sessions,
                 config.ssh_policy().gp.sshjail.idle_timeout_secs,
                 config.ssh_policy().gp.sshjail.max_session_duration_secs,
-                config.ssh_policy().gp.sshjail.audit_dir,
+                config.ssh_policy().gp.sshjail.root_dir,
+                config.ssh_policy().gp.sshjail.static_blacklist_keys_path,
                 config.ssh_policy().gp.sshjail.hostname_strategy,
                 config.ssh_policy().gp.sshjail.fake_hostname
             );
@@ -639,7 +699,88 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
             let summary = daemon.replay_ssh_log_file(path, start_at_secs, step_secs)?;
             print_ingest_summary(&summary);
         }
+        SshCommand::Overlay { command } => handle_ssh_overlay(command)?,
         SshCommand::Gp { command } => handle_ssh_gp(command)?,
+    }
+
+    Ok(())
+}
+
+fn handle_ssh_overlay(command: SshOverlayCommand) -> Result<()> {
+    match command {
+        SshOverlayCommand::AuthorizedKeys {
+            user,
+            uid,
+            home,
+            key_type,
+            key_base64,
+            fingerprint,
+        } => {
+            if !walle_daemon::runtime_lock_is_active() {
+                return Ok(());
+            }
+
+            let Ok(config) = WalleConfig::load_default() else {
+                return Ok(());
+            };
+            let ssh_policy = config.ssh_policy();
+            let containment_enabled =
+                gp_containment_enabled(ssh_policy.gp.strategy, ssh_policy.gp.enabled);
+            if !containment_enabled {
+                return Ok(());
+            }
+
+            let Ok(current_executable) = std::env::current_exe() else {
+                return Ok(());
+            };
+
+            let request = AuthorizedKeysTrapRequest {
+                user,
+                uid,
+                home,
+                key_type,
+                key_base64,
+                fingerprint,
+            };
+            if let Ok(Some(decision)) = evaluate_authorized_keys_trap(
+                &ssh_policy.gp.sshjail,
+                &request,
+                true,
+                containment_enabled,
+                current_executable.as_path(),
+            ) {
+                println!("{}", decision.authorized_key_line);
+            }
+        }
+        SshOverlayCommand::TrapShell { token } => {
+            let config = load_default_config("walle ssh overlay trap-shell")?;
+            let status = run_local_trap_command(&config.ssh_policy().gp.sshjail, token.as_str())?;
+            process::exit(status);
+        }
+        SshOverlayCommand::TrapLogin => {
+            let config = load_default_config("walle ssh overlay trap-login")?;
+            let status = run_local_trap_login(&config.ssh_policy().gp.sshjail)?;
+            process::exit(status);
+        }
+        SshOverlayCommand::PrintSshdConfig => {
+            let current_executable = std::env::current_exe()
+                .context("failed to resolve the current walle executable")?;
+            print!(
+                "{}",
+                render_sshd_config_fragment(current_executable.as_path())
+            );
+        }
+        SshOverlayCommand::PrintNsswitchConfig => {
+            print!("{}", render_nsswitch_config_fragment());
+        }
+        SshOverlayCommand::PrintPamConfig => {
+            print!(
+                "{}",
+                render_pam_config_fragment(
+                    PathBuf::from("/usr/local/lib/walle/pam_walle.so").as_path()
+                )
+            );
+        }
     }
 
     Ok(())
@@ -663,13 +804,13 @@ fn handle_ssh_gp(command: SshGpCommand) -> Result<()> {
             policy.max_sessions = max_sessions;
             policy.listen_port = listen_port;
             if let Some(path) = audit_dir {
-                policy.audit_dir = path.display().to_string();
+                policy.root_dir = path.display().to_string();
             } else {
                 let nanos = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos();
-                policy.audit_dir = std::env::temp_dir()
+                policy.root_dir = std::env::temp_dir()
                     .join(format!("walle-sshjail-stress-{nanos}"))
                     .display()
                     .to_string();
@@ -804,7 +945,7 @@ fn handle_icmp(command: IcmpCommand) -> Result<()> {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command, SshCommand, SshGpCommand};
+    use super::{Cli, Command, SshCommand, SshGpCommand, SshOverlayCommand};
 
     #[test]
     fn ssh_gp_stress_test_parses_defaults() {
@@ -923,5 +1064,87 @@ mod tests {
         assert_eq!(connect_timeout_ms, 8_000);
         assert_eq!(listen_port, 2_222);
         assert_eq!(username, "admin");
+    }
+
+    #[test]
+    fn ssh_overlay_authorized_keys_parses_expected_tokens() {
+        let cli = Cli::parse_from([
+            "walle",
+            "ssh",
+            "overlay",
+            "authorized-keys",
+            "--user",
+            "ubuntu",
+            "--uid",
+            "1000",
+            "--home",
+            "/home/ubuntu",
+            "--key-type",
+            "ssh-ed25519",
+            "--key-base64",
+            "AAAAC3NzaC1lZDI1NTE5AAAAIExample",
+            "--fingerprint",
+            "SHA256:example",
+        ]);
+        let Command::Ssh(args) = cli.command else {
+            panic!("expected ssh command");
+        };
+        let SshCommand::Overlay { command } = args.command else {
+            panic!("expected ssh overlay subcommand");
+        };
+        let SshOverlayCommand::AuthorizedKeys {
+            user,
+            uid,
+            home,
+            key_type,
+            key_base64,
+            fingerprint,
+        } = command
+        else {
+            panic!("expected authorized-keys subcommand");
+        };
+
+        assert_eq!(user, "ubuntu");
+        assert_eq!(uid, Some(1000));
+        assert_eq!(home.as_deref(), Some("/home/ubuntu"));
+        assert_eq!(key_type, "ssh-ed25519");
+        assert_eq!(key_base64, "AAAAC3NzaC1lZDI1NTE5AAAAIExample");
+        assert_eq!(fingerprint, "SHA256:example");
+    }
+
+    #[test]
+    fn ssh_overlay_print_sshd_config_parses() {
+        let cli = Cli::parse_from(["walle", "ssh", "overlay", "print-sshd-config"]);
+        let Command::Ssh(args) = cli.command else {
+            panic!("expected ssh command");
+        };
+        let SshCommand::Overlay { command } = args.command else {
+            panic!("expected ssh overlay subcommand");
+        };
+        assert!(matches!(command, SshOverlayCommand::PrintSshdConfig));
+    }
+
+    #[test]
+    fn ssh_overlay_print_nsswitch_config_parses() {
+        let cli = Cli::parse_from(["walle", "ssh", "overlay", "print-nsswitch-config"]);
+        let Command::Ssh(args) = cli.command else {
+            panic!("expected ssh command");
+        };
+        let SshCommand::Overlay { command } = args.command else {
+            panic!("expected ssh overlay subcommand");
+        };
+        assert!(matches!(command, SshOverlayCommand::PrintNsswitchConfig));
+    }
+
+    #[test]
+    fn ssh_overlay_print_pam_config_parses() {
+        let cli = Cli::parse_from(["walle", "ssh", "overlay", "print-pam-config"]);
+        let Command::Ssh(args) = cli.command else {
+            panic!("expected ssh command");
+        };
+        let SshCommand::Overlay { command } = args.command else {
+            panic!("expected ssh overlay subcommand");
+        };
+        assert!(matches!(command, SshOverlayCommand::PrintPamConfig));
     }
 }

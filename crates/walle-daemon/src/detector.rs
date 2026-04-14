@@ -1269,13 +1269,13 @@ mod tests {
 
     use walle_policy::{SshLogSourceMode, SshProtectionPolicy};
 
+    #[cfg(target_os = "linux")]
+    use super::journalctl_follow_args;
     use super::{
         LogFileCursor, SshDetectorService, SshFailureReason, SshLiveSourceCapabilities,
         SshLiveSourceMode, SshLogIngestor, SshResolvedLogSource, live_source_candidates,
         parse_failure_event, resolve_sources_with, split_lines_with_carryover,
     };
-    #[cfg(target_os = "linux")]
-    use super::journalctl_follow_args;
 
     #[test]
     fn parses_failed_password_line_from_auth_log() {
@@ -1479,9 +1479,10 @@ mod tests {
     #[test]
     fn journald_follow_args_with_cursor_resume_precisely() {
         let args = journalctl_follow_args(Some("s=123;i=456"));
-        assert!(args.windows(2).any(|window| {
-            window[0] == "--after-cursor" && window[1] == "s=123;i=456"
-        }));
+        assert!(
+            args.windows(2)
+                .any(|window| { window[0] == "--after-cursor" && window[1] == "s=123;i=456" })
+        );
         assert!(args.iter().any(|value| value == "--follow"));
         assert!(!args.iter().any(|value| value == "--since"));
     }
@@ -1490,8 +1491,14 @@ mod tests {
     #[test]
     fn journald_follow_args_without_cursor_skip_historical_entries() {
         let args = journalctl_follow_args(None);
-        assert!(args.windows(2).any(|window| window[0] == "--lines" && window[1] == "0"));
-        assert!(args.windows(2).any(|window| window[0] == "--since" && window[1] == "now"));
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "--lines" && window[1] == "0")
+        );
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "--since" && window[1] == "now")
+        );
         assert!(args.iter().any(|value| value == "--follow"));
     }
 

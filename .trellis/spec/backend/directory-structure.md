@@ -11,6 +11,8 @@
 * a user-facing CLI binary
 * long-running daemon logic
 * shared policy and type definitions
+* NSS identity-overlay integration
+* PAM trap integration
 * eBPF/XDP program code
 * build and developer automation
 
@@ -31,6 +33,10 @@ crates/
       policy/
       runtime/
   walle-common/
+    src/
+  walle-nss/
+    src/
+  walle-pam/
     src/
   walle-policy/
     src/
@@ -60,6 +66,12 @@ Use these ownership rules:
   * runtime orchestration
 * `walle-common`
   * plain shared structs and enums that do not pull in heavy runtime dependencies
+* `walle-nss`
+  * NSS identity-overlay glue used by `sshd` account lookups
+  * no daemon lifecycle or packet-path logic
+* `walle-pam`
+  * PAM auth/account/session trap glue used by `sshd`
+  * capture only the PAM-facing data needed for overlay trap behavior
 * `walle-policy`
   * config schema
   * validation
@@ -94,4 +106,6 @@ Current scaffold examples:
 * [`walle-cli main`](E:/coding/github_projects/walle/crates/walle-cli/src/main.rs): the user-facing `walle` binary entrypoint and command tree
 * [`walle-daemon lib`](E:/coding/github_projects/walle/crates/walle-daemon/src/lib.rs): runtime orchestration boundary kept outside CLI parsing
 * [`walle-daemon detector`](E:/coding/github_projects/walle/crates/walle-daemon/src/detector.rs): SSH detector module ownership
+* [`walle-nss lib`](E:/coding/github_projects/walle/crates/walle-nss/src/lib.rs): NSS identity-overlay boundary
+* [`walle-pam lib`](E:/coding/github_projects/walle/crates/walle-pam/src/lib.rs): PAM trap boundary
 * [`walle-ebpf lib`](E:/coding/github_projects/walle/crates/walle-ebpf/src/lib.rs): packet-path placeholder code

@@ -3,14 +3,31 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use crate::ssh_overlay::{
+    render_nsswitch_config_fragment, render_pam_config_fragment, render_sshd_config_fragment,
+    render_trap_login_shell_wrapper,
+};
 use crate::xdp::{bundled_object_path, default_object_path};
 use thiserror::Error;
 
 const INSTALL_BIN_RELATIVE_PATH: &str = "usr/local/bin/walle";
 const INSTALL_OBJECT_RELATIVE_PATH: &str = "usr/local/lib/walle/walle-ebpf";
+const INSTALL_NSS_MODULE_RELATIVE_PATH: &str = "lib/libnss_walle.so.2";
+const INSTALL_PAM_MODULE_RELATIVE_PATH: &str = "usr/local/lib/walle/pam_walle.so";
+const INSTALL_SSH_OVERLAY_SAMPLE_RELATIVE_PATH: &str =
+    "usr/local/lib/walle/walle-ssh-overlay.conf.sample";
+const INSTALL_NSS_OVERLAY_SAMPLE_RELATIVE_PATH: &str =
+    "usr/local/lib/walle/walle-nsswitch.conf.sample";
+const INSTALL_PAM_OVERLAY_SAMPLE_RELATIVE_PATH: &str =
+    "usr/local/lib/walle/walle-sshd-pam.conf.sample";
+const INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH: &str = "usr/local/lib/walle/walle-ssh-overlay-shell";
 const INSTALL_SCRIPT_RELATIVE_PATH: &str = "usr/local/lib/walle/walle-run.sh";
 const INSTALL_UNIT_RELATIVE_PATH: &str = "etc/systemd/system/walle.service";
 const INSTALL_CONFIG_RELATIVE_PATH: &str = "etc/walle/config.toml";
+const NSS_MODULE_FILENAME: &str = "libnss_walle.so.2";
+const NSS_MODULE_BUILD_ARTIFACT: &str = "libnss_walle.so";
+const PAM_MODULE_FILENAME: &str = "pam_walle.so";
+const PAM_MODULE_BUILD_ARTIFACT: &str = "libpam_walle.so";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstallOptions {
@@ -62,7 +79,13 @@ impl ServiceManager {
 pub struct InstallReport {
     pub binary_path: PathBuf,
     pub object_path: PathBuf,
+    pub nss_module_path: PathBuf,
+    pub pam_module_path: PathBuf,
     pub config_path: PathBuf,
+    pub ssh_overlay_sample_path: PathBuf,
+    pub nss_overlay_sample_path: PathBuf,
+    pub pam_overlay_sample_path: PathBuf,
+    pub trap_login_shell_path: PathBuf,
     pub service_manager: ServiceManager,
     pub service_path: PathBuf,
     pub config_created: bool,
@@ -87,7 +110,15 @@ pub fn install(options: InstallOptions) -> Result<InstallReport, InstallError> {
         let current_executable =
             env::current_exe().map_err(|source| InstallError::CurrentExecutable { source })?;
         let source_object = resolve_xdp_object(options.xdp_object.as_deref(), &current_executable)?;
-        install_with_sources(options, &current_executable, &source_object)
+        let source_nss_module = resolve_nss_module(&current_executable)?;
+        let source_pam_module = resolve_pam_module(&current_executable)?;
+        install_with_sources(
+            options,
+            &current_executable,
+            &source_object,
+            &source_nss_module,
+            &source_pam_module,
+        )
     }
 }
 
@@ -106,6 +137,12 @@ pub fn uninstall(options: UninstallOptions) -> Result<UninstallReport, InstallEr
         for relative_path in [
             INSTALL_BIN_RELATIVE_PATH,
             INSTALL_OBJECT_RELATIVE_PATH,
+            INSTALL_NSS_MODULE_RELATIVE_PATH,
+            INSTALL_PAM_MODULE_RELATIVE_PATH,
+            INSTALL_SSH_OVERLAY_SAMPLE_RELATIVE_PATH,
+            INSTALL_NSS_OVERLAY_SAMPLE_RELATIVE_PATH,
+            INSTALL_PAM_OVERLAY_SAMPLE_RELATIVE_PATH,
+            INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH,
             INSTALL_SCRIPT_RELATIVE_PATH,
             INSTALL_UNIT_RELATIVE_PATH,
         ] {
@@ -127,10 +164,21 @@ fn install_with_sources(
     options: InstallOptions,
     current_executable: &Path,
     source_object: &Path,
+    source_nss_module: &Path,
+    source_pam_module: &Path,
 ) -> Result<InstallReport, InstallError> {
     let binary_path = join_root(&options.root, INSTALL_BIN_RELATIVE_PATH);
     let object_path = join_root(&options.root, INSTALL_OBJECT_RELATIVE_PATH);
+    let nss_module_path = join_root(&options.root, INSTALL_NSS_MODULE_RELATIVE_PATH);
+    let pam_module_path = join_root(&options.root, INSTALL_PAM_MODULE_RELATIVE_PATH);
     let config_path = join_root(&options.root, INSTALL_CONFIG_RELATIVE_PATH);
+    let ssh_overlay_sample_path =
+        join_root(&options.root, INSTALL_SSH_OVERLAY_SAMPLE_RELATIVE_PATH);
+    let nss_overlay_sample_path =
+        join_root(&options.root, INSTALL_NSS_OVERLAY_SAMPLE_RELATIVE_PATH);
+    let pam_overlay_sample_path =
+        join_root(&options.root, INSTALL_PAM_OVERLAY_SAMPLE_RELATIVE_PATH);
+    let trap_login_shell_path = join_root(&options.root, INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH);
     let service_manager = options
         .service_manager
         .unwrap_or_else(detect_service_manager);
@@ -144,7 +192,26 @@ fn install_with_sources(
 
     copy_with_parents(current_executable, &binary_path)?;
     copy_with_parents(source_object, &object_path)?;
+    copy_with_parents(source_nss_module, &nss_module_path)?;
+    copy_with_parents(source_pam_module, &pam_module_path)?;
     make_executable(&binary_path)?;
+    write_file(
+        &ssh_overlay_sample_path,
+        render_sshd_config_fragment(Path::new("/usr/local/bin/walle")).as_str(),
+    )?;
+    write_file(
+        &nss_overlay_sample_path,
+        render_nsswitch_config_fragment().as_str(),
+    )?;
+    write_file(
+        &pam_overlay_sample_path,
+        render_pam_config_fragment(Path::new("/usr/local/lib/walle/pam_walle.so")).as_str(),
+    )?;
+    write_file(
+        &trap_login_shell_path,
+        render_trap_login_shell_wrapper(Path::new("/usr/local/bin/walle")).as_str(),
+    )?;
+    make_executable(&trap_login_shell_path)?;
 
     let config_created = if config_path.exists() {
         false
@@ -166,7 +233,13 @@ fn install_with_sources(
     Ok(InstallReport {
         binary_path,
         object_path,
+        nss_module_path,
+        pam_module_path,
         config_path,
+        ssh_overlay_sample_path,
+        nss_overlay_sample_path,
+        pam_overlay_sample_path,
+        trap_login_shell_path,
         service_manager,
         service_path,
         config_created,
@@ -218,6 +291,26 @@ fn resolve_xdp_object(
 }
 
 #[cfg(target_os = "linux")]
+fn resolve_nss_module(current_executable: &Path) -> Result<PathBuf, InstallError> {
+    let searched = nss_module_candidates(current_executable);
+    searched
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
+        .ok_or(InstallError::MissingNssModule { searched })
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_pam_module(current_executable: &Path) -> Result<PathBuf, InstallError> {
+    let searched = pam_module_candidates(current_executable);
+    searched
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
+        .ok_or(InstallError::MissingPamModule { searched })
+}
+
+#[cfg(target_os = "linux")]
 fn ensure_install_privileges(root: &Path) -> Result<(), InstallError> {
     if root != Path::new("/") {
         return Ok(());
@@ -242,6 +335,91 @@ fn detect_service_manager() -> ServiceManager {
         ServiceManager::Systemd
     } else {
         ServiceManager::Script
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn nss_module_candidates(current_executable: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(parent) = current_executable.parent() {
+        push_unique(&mut candidates, parent.join(NSS_MODULE_FILENAME));
+        push_unique(&mut candidates, parent.join(NSS_MODULE_BUILD_ARTIFACT));
+    }
+
+    if let Some(path) = bundled_nss_module_path(current_executable) {
+        push_unique(&mut candidates, path);
+    }
+
+    let workspace_root = workspace_root();
+    push_unique(
+        &mut candidates,
+        workspace_root.join(format!("target/release/{NSS_MODULE_BUILD_ARTIFACT}")),
+    );
+    push_unique(
+        &mut candidates,
+        workspace_root.join(format!("target/debug/{NSS_MODULE_BUILD_ARTIFACT}")),
+    );
+
+    candidates
+}
+
+#[cfg(target_os = "linux")]
+fn pam_module_candidates(current_executable: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(parent) = current_executable.parent() {
+        push_unique(&mut candidates, parent.join(PAM_MODULE_FILENAME));
+        push_unique(&mut candidates, parent.join(PAM_MODULE_BUILD_ARTIFACT));
+    }
+
+    if let Some(path) = bundled_pam_module_path(current_executable) {
+        push_unique(&mut candidates, path);
+    }
+
+    let workspace_root = workspace_root();
+    push_unique(
+        &mut candidates,
+        workspace_root.join(format!("target/release/{PAM_MODULE_BUILD_ARTIFACT}")),
+    );
+    push_unique(
+        &mut candidates,
+        workspace_root.join(format!("target/debug/{PAM_MODULE_BUILD_ARTIFACT}")),
+    );
+
+    candidates
+}
+
+#[cfg(target_os = "linux")]
+fn bundled_nss_module_path(current_executable: &Path) -> Option<PathBuf> {
+    let executable_dir = current_executable.parent()?;
+    if executable_dir.file_name().and_then(|name| name.to_str()) != Some("bin") {
+        return None;
+    }
+    let bundle_root = executable_dir.parent()?;
+    Some(bundle_root.join(format!("lib/{NSS_MODULE_FILENAME}")))
+}
+
+#[cfg(target_os = "linux")]
+fn bundled_pam_module_path(current_executable: &Path) -> Option<PathBuf> {
+    let executable_dir = current_executable.parent()?;
+    if executable_dir.file_name().and_then(|name| name.to_str()) != Some("bin") {
+        return None;
+    }
+    let bundle_root = executable_dir.parent()?;
+    Some(bundle_root.join(format!("lib/walle/{PAM_MODULE_FILENAME}")))
+}
+
+fn workspace_root() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or(manifest_dir)
+}
+
+fn push_unique(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !candidates.contains(&candidate) {
+        candidates.push(candidate);
     }
 }
 
@@ -330,7 +508,8 @@ fn default_config_template() -> &'static str {
         "max_sessions = 32\n",
         "idle_timeout_secs = 600\n",
         "max_session_duration_secs = 3600\n",
-        "audit_dir = \"/tmp/walle/gp/ssh\"\n",
+        "root_dir = \"/tmp/walle\"\n",
+        "static_blacklist_keys_path = \"/etc/walle/blacklist_keys\"\n",
         "hostname_strategy = \"generated\"\n",
         "\n",
         "[policy.access]\n",
@@ -393,6 +572,24 @@ pub enum InstallError {
             .join(", ")
     )]
     MissingXdpObject { searched: Vec<PathBuf> },
+    #[error(
+        "failed to find the NSS identity-overlay module to install; searched: {}. build it with `cargo build -p walle-nss --release`, include `libnss_walle.so.2` in the release bundle under `lib/`, or rerun install from a workspace where `libnss_walle.so` was built",
+        .searched
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )]
+    MissingNssModule { searched: Vec<PathBuf> },
+    #[error(
+        "failed to find the PAM trap module to install; searched: {}. build it with `cargo build -p walle-pam --release`, include `pam_walle.so` in the release bundle under `lib/walle/`, or rerun install from a workspace where `libpam_walle.so` was built",
+        .searched
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )]
+    MissingPamModule { searched: Vec<PathBuf> },
     #[error("failed to create directory '{path}': {source}")]
     CreateDir {
         path: PathBuf,
@@ -422,10 +619,14 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        INSTALL_BIN_RELATIVE_PATH, INSTALL_CONFIG_RELATIVE_PATH, INSTALL_OBJECT_RELATIVE_PATH,
-        INSTALL_SCRIPT_RELATIVE_PATH, INSTALL_UNIT_RELATIVE_PATH, InstallOptions, ServiceManager,
-        UninstallOptions, default_config_template, install_with_sources, join_root,
-        resolve_xdp_object, uninstall,
+        INSTALL_BIN_RELATIVE_PATH, INSTALL_CONFIG_RELATIVE_PATH, INSTALL_NSS_MODULE_RELATIVE_PATH,
+        INSTALL_NSS_OVERLAY_SAMPLE_RELATIVE_PATH, INSTALL_OBJECT_RELATIVE_PATH,
+        INSTALL_PAM_MODULE_RELATIVE_PATH, INSTALL_PAM_OVERLAY_SAMPLE_RELATIVE_PATH,
+        INSTALL_SCRIPT_RELATIVE_PATH, INSTALL_SSH_OVERLAY_SAMPLE_RELATIVE_PATH,
+        INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH, INSTALL_UNIT_RELATIVE_PATH, InstallOptions,
+        ServiceManager, UninstallOptions, bundled_nss_module_path, bundled_pam_module_path,
+        default_config_template, install_with_sources, join_root, resolve_nss_module,
+        resolve_pam_module, resolve_xdp_object, uninstall,
     };
     use crate::xdp::bundled_object_path;
 
@@ -458,8 +659,12 @@ mod tests {
         std::fs::create_dir_all(&source_dir).unwrap();
         let current_executable = source_dir.join("walle");
         let xdp_object = source_dir.join("walle-ebpf");
+        let nss_module = source_dir.join("libnss_walle.so.2");
+        let pam_module = source_dir.join("pam_walle.so");
         std::fs::write(&current_executable, "bin").unwrap();
         std::fs::write(&xdp_object, "obj").unwrap();
+        std::fs::write(&nss_module, "nss").unwrap();
+        std::fs::write(&pam_module, "pam").unwrap();
 
         let config_path = join_root(&root, INSTALL_CONFIG_RELATIVE_PATH);
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -473,6 +678,8 @@ mod tests {
             },
             &current_executable,
             &xdp_object,
+            &nss_module,
+            &pam_module,
         )
         .unwrap();
 
@@ -480,11 +687,39 @@ mod tests {
         assert!(!report.config_created);
         assert!(join_root(&root, INSTALL_BIN_RELATIVE_PATH).exists());
         assert!(join_root(&root, INSTALL_OBJECT_RELATIVE_PATH).exists());
+        assert!(join_root(&root, INSTALL_NSS_MODULE_RELATIVE_PATH).exists());
+        assert!(join_root(&root, INSTALL_PAM_MODULE_RELATIVE_PATH).exists());
+        assert!(join_root(&root, INSTALL_SSH_OVERLAY_SAMPLE_RELATIVE_PATH).exists());
+        assert!(join_root(&root, INSTALL_NSS_OVERLAY_SAMPLE_RELATIVE_PATH).exists());
+        assert!(join_root(&root, INSTALL_PAM_OVERLAY_SAMPLE_RELATIVE_PATH).exists());
+        assert!(join_root(&root, INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH).exists());
         assert!(join_root(&root, INSTALL_UNIT_RELATIVE_PATH).exists());
         assert!(!join_root(&root, INSTALL_SCRIPT_RELATIVE_PATH).exists());
         assert!(std::fs::read_to_string(join_root(&root, INSTALL_UNIT_RELATIVE_PATH))
             .unwrap()
             .contains("ExecStart=/usr/local/bin/walle run --xdp-object /usr/local/lib/walle/walle-ebpf"));
+        assert!(
+            std::fs::read_to_string(join_root(&root, INSTALL_SSH_OVERLAY_SAMPLE_RELATIVE_PATH))
+                .unwrap()
+                .contains("AuthorizedKeysCommand /usr/local/bin/walle ssh overlay authorized-keys")
+        );
+        assert!(
+            std::fs::read_to_string(join_root(&root, INSTALL_NSS_OVERLAY_SAMPLE_RELATIVE_PATH))
+                .unwrap()
+                .contains("passwd: files walle systemd")
+        );
+        assert!(
+            std::fs::read_to_string(join_root(&root, INSTALL_PAM_OVERLAY_SAMPLE_RELATIVE_PATH))
+                .unwrap()
+                .contains(
+                    "auth    [success=done default=ignore] /usr/local/lib/walle/pam_walle.so"
+                )
+        );
+        assert!(
+            std::fs::read_to_string(join_root(&root, INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH))
+                .unwrap()
+                .contains("exec /usr/local/bin/walle ssh overlay trap-login")
+        );
     }
 
     #[test]
@@ -494,6 +729,26 @@ mod tests {
         assert_eq!(
             bundled,
             PathBuf::from("/tmp/walle-release/lib/walle/walle-ebpf")
+        );
+    }
+
+    #[test]
+    fn bundled_nss_module_path_resolves_from_bin_layout() {
+        let current_executable = PathBuf::from("/tmp/walle-release/bin/walle");
+        let bundled = bundled_nss_module_path(&current_executable).unwrap();
+        assert_eq!(
+            bundled,
+            PathBuf::from("/tmp/walle-release/lib/libnss_walle.so.2")
+        );
+    }
+
+    #[test]
+    fn bundled_pam_module_path_resolves_from_bin_layout() {
+        let current_executable = PathBuf::from("/tmp/walle-release/bin/walle");
+        let bundled = bundled_pam_module_path(&current_executable).unwrap();
+        assert_eq!(
+            bundled,
+            PathBuf::from("/tmp/walle-release/lib/walle/pam_walle.so")
         );
     }
 
@@ -515,11 +770,78 @@ mod tests {
     }
 
     #[test]
+    fn resolve_nss_module_uses_bundle_layout_relative_to_bin() {
+        let root = temp_root("install-nss-bundle-lookup");
+        let bin_dir = root.join("bin");
+        let lib_dir = root.join("lib");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&lib_dir).unwrap();
+
+        let current_executable = bin_dir.join("walle");
+        let bundled_nss_module = lib_dir.join("libnss_walle.so.2");
+        std::fs::write(&current_executable, "bin").unwrap();
+        std::fs::write(&bundled_nss_module, "nss").unwrap();
+
+        let resolved = resolve_nss_module(&current_executable).unwrap();
+        assert_eq!(resolved, bundled_nss_module);
+    }
+
+    #[test]
+    fn resolve_pam_module_uses_bundle_layout_relative_to_bin() {
+        let root = temp_root("install-pam-bundle-lookup");
+        let bin_dir = root.join("bin");
+        let lib_dir = root.join("lib/walle");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&lib_dir).unwrap();
+
+        let current_executable = bin_dir.join("walle");
+        let bundled_pam_module = lib_dir.join("pam_walle.so");
+        std::fs::write(&current_executable, "bin").unwrap();
+        std::fs::write(&bundled_pam_module, "pam").unwrap();
+
+        let resolved = resolve_pam_module(&current_executable).unwrap();
+        assert_eq!(resolved, bundled_pam_module);
+    }
+
+    #[test]
+    fn resolve_pam_module_accepts_workspace_build_artifact_name() {
+        let root = temp_root("install-pam-workspace-lookup");
+        let current_executable = root.join("walle");
+        std::fs::write(&current_executable, "bin").unwrap();
+
+        let release_artifact = super::workspace_root().join("target/release/libpam_walle.so");
+        let debug_artifact = super::workspace_root().join("target/debug/libpam_walle.so");
+        std::fs::create_dir_all(debug_artifact.parent().unwrap()).unwrap();
+        let cleanup_needed = !debug_artifact.exists();
+        if cleanup_needed {
+            std::fs::write(&debug_artifact, "pam").unwrap();
+        }
+
+        let resolved = resolve_pam_module(&current_executable).unwrap();
+        let expected = if release_artifact.exists() {
+            release_artifact
+        } else {
+            debug_artifact.clone()
+        };
+        assert_eq!(resolved, expected);
+
+        if cleanup_needed {
+            let _ = std::fs::remove_file(&debug_artifact);
+        }
+    }
+
+    #[test]
     fn uninstall_removes_managed_artifacts_but_preserves_config() {
         let root = temp_root("uninstall");
         for relative_path in [
             INSTALL_BIN_RELATIVE_PATH,
             INSTALL_OBJECT_RELATIVE_PATH,
+            INSTALL_NSS_MODULE_RELATIVE_PATH,
+            INSTALL_PAM_MODULE_RELATIVE_PATH,
+            INSTALL_SSH_OVERLAY_SAMPLE_RELATIVE_PATH,
+            INSTALL_NSS_OVERLAY_SAMPLE_RELATIVE_PATH,
+            INSTALL_PAM_OVERLAY_SAMPLE_RELATIVE_PATH,
+            INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH,
             INSTALL_SCRIPT_RELATIVE_PATH,
         ] {
             let path = join_root(&root, relative_path);
@@ -536,6 +858,12 @@ mod tests {
         assert!(report.removed_paths.len() >= 3);
         assert!(!join_root(&root, INSTALL_BIN_RELATIVE_PATH).exists());
         assert!(!join_root(&root, INSTALL_OBJECT_RELATIVE_PATH).exists());
+        assert!(!join_root(&root, INSTALL_NSS_MODULE_RELATIVE_PATH).exists());
+        assert!(!join_root(&root, INSTALL_PAM_MODULE_RELATIVE_PATH).exists());
+        assert!(!join_root(&root, INSTALL_SSH_OVERLAY_SAMPLE_RELATIVE_PATH).exists());
+        assert!(!join_root(&root, INSTALL_NSS_OVERLAY_SAMPLE_RELATIVE_PATH).exists());
+        assert!(!join_root(&root, INSTALL_PAM_OVERLAY_SAMPLE_RELATIVE_PATH).exists());
+        assert!(!join_root(&root, INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH).exists());
         assert!(!join_root(&root, INSTALL_SCRIPT_RELATIVE_PATH).exists());
         assert!(join_root(&root, INSTALL_CONFIG_RELATIVE_PATH).exists());
     }

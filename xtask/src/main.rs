@@ -22,7 +22,8 @@ fn run() -> Result<()> {
 
     match args.next().as_deref() {
         Some("build-ebpf") => build_ebpf(!args.any(|arg| arg == "--debug")),
-        Some("build-release") => build_release(),
+        Some("build-release") => build_bundle(BuildProfile::Release),
+        Some("build-debug") => build_bundle(BuildProfile::Debug),
         Some("verify-icmp-rule") => verify_icmp_rule(args.collect()),
         Some("emit-bpftool-config") => emit_bpftool_config(args.collect()),
         Some("emit-bpftool-icmp-rule") => emit_bpftool_icmp_rule(args.collect()),
@@ -71,14 +72,58 @@ fn build_ebpf(release: bool) -> Result<()> {
     Ok(())
 }
 
-fn build_release() -> Result<()> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuildProfile {
+    Debug,
+    Release,
+}
+
+impl BuildProfile {
+    fn bundle_artifact_basename(self, version: &str, arch: &str) -> String {
+        match self {
+            Self::Release => format!("walle-v{version}-linux-{arch}"),
+            Self::Debug => format!("walle-v{version}-linux-{arch}-debug"),
+        }
+    }
+
+    const fn bundle_dir_name(self) -> &'static str {
+        match self {
+            Self::Release => "release-bundle",
+            Self::Debug => "debug-bundle",
+        }
+    }
+
+    const fn cargo_profile_dir(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Debug => "debug",
+        }
+    }
+
+    const fn is_release(self) -> bool {
+        matches!(self, Self::Release)
+    }
+
+    const fn ebpf_is_release(self) -> bool {
+        true
+    }
+
+    const fn human_name(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Debug => "debug",
+        }
+    }
+}
+
+fn build_bundle(profile: BuildProfile) -> Result<()> {
     let root = workspace_root();
     let version = workspace_version(&root)?;
     let arch = release_arch(&root)?;
-    let artifact_basename = format!("walle-v{version}-linux-{arch}");
-    let release_bundle_dir = root.join("target/release-bundle");
-    let stage_root = release_bundle_dir.join(&artifact_basename);
-    let artifact_path = release_bundle_dir.join(format!("{artifact_basename}.tar.gz"));
+    let artifact_basename = profile.bundle_artifact_basename(&version, &arch);
+    let bundle_dir = root.join("target").join(profile.bundle_dir_name());
+    let stage_root = bundle_dir.join(&artifact_basename);
+    let artifact_path = bundle_dir.join(format!("{artifact_basename}.tar.gz"));
 
     reset_dir(&stage_root)?;
     fs::create_dir_all(stage_root.join("bin"))
@@ -96,19 +141,52 @@ fn build_release() -> Result<()> {
         )
     })?;
 
+    let mut cargo_args = vec!["build"];
+    if profile.is_release() {
+        cargo_args.push("--release");
+    }
+    cargo_args.extend(["-p", "walle-cli", "-p", "walle-nss", "-p", "walle-pam"]);
     run_command(
-        cargo_command(&root, &["build", "--release", "-p", "walle-cli"]),
-        "failed to build release walle binary",
+        cargo_command(&root, &cargo_args),
+        format!(
+            "failed to build {} walle binary, NSS module, and PAM module",
+            profile.human_name()
+        )
+        .as_str(),
     )?;
-    build_ebpf(true)?;
+    // Keep the eBPF object on the optimized release profile even for debug
+    // bundles. The debug BPF profile currently emits `__bpf_trap`
+    // relocations that Aya cannot resolve at load time on target hosts.
+    build_ebpf(profile.ebpf_is_release())?;
 
     copy_file(
-        &root.join("target/release/walle"),
+        &root.join(format!("target/{}/walle", profile.cargo_profile_dir())),
         &stage_root.join("bin/walle"),
     )?;
     copy_file(
-        &root.join("target/bpfel-unknown-none/release/walle-ebpf"),
+        &root.join(format!(
+            "target/bpfel-unknown-none/{}/walle-ebpf",
+            if profile.ebpf_is_release() {
+                "release"
+            } else {
+                "debug"
+            }
+        )),
         &stage_root.join("lib/walle/walle-ebpf"),
+    )?;
+    copy_file(
+        &root.join(format!(
+            "target/{}/libnss_walle.so",
+            profile.cargo_profile_dir()
+        )),
+        &stage_root.join("lib/libnss_walle.so.2"),
+    )?;
+    copy_file(
+        &root.join(format!(
+            "target/{}/libpam_walle.so",
+            profile.cargo_profile_dir()
+        )),
+        &stage_root.join("lib/walle/pam_walle.so"),
     )?;
     copy_file(
         &root.join("README.md"),
@@ -125,6 +203,8 @@ fn build_release() -> Result<()> {
 
     set_mode(&stage_root.join("bin/walle"), 0o755)?;
     set_mode(&stage_root.join("lib/walle/walle-ebpf"), 0o644)?;
+    set_mode(&stage_root.join("lib/libnss_walle.so.2"), 0o755)?;
+    set_mode(&stage_root.join("lib/walle/pam_walle.so"), 0o755)?;
     set_mode(&stage_root.join("share/doc/walle/README.md"), 0o644)?;
     set_mode(&stage_root.join("share/doc/walle/LICENSE"), 0o644)?;
     set_mode(
@@ -136,13 +216,13 @@ fn build_release() -> Result<()> {
         {
             let mut command = Command::new("tar");
             command
-                .current_dir(&release_bundle_dir)
+                .current_dir(&bundle_dir)
                 .arg("-czf")
                 .arg(&artifact_path)
                 .arg(&artifact_basename);
             command
         },
-        "failed to create release archive",
+        format!("failed to create {} archive", profile.human_name()).as_str(),
     )?;
 
     println!("{}", artifact_path.display());
@@ -511,6 +591,7 @@ fn print_help() {
     println!("xtask commands:");
     println!("  build-ebpf [--debug]");
     println!("  build-release");
+    println!("  build-debug");
     println!("  verify-icmp-rule <rule-payload-bytes> <icmp-payload-bytes>");
     println!("  emit-bpftool-config <access-mode> <icmp-mode> [map-path]");
     println!("  emit-bpftool-icmp-rule <payload-bytes> [map-path]");
@@ -520,10 +601,29 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_bpftool_delete_command, format_bpftool_update_command, format_hex_bytes,
-        parse_access_mode, parse_icmp_mode, serialize_icmp_rule, serialize_runtime_config,
+        BuildProfile, format_bpftool_delete_command, format_bpftool_update_command,
+        format_hex_bytes, parse_access_mode, parse_icmp_mode, serialize_icmp_rule,
+        serialize_runtime_config,
     };
     use walle_common::{AccessMode, CONFIG_MAP_KEY, IcmpMode, IcmpRule, RuntimeConfig};
+
+    #[test]
+    fn bundle_profiles_render_distinct_artifact_names() {
+        assert_eq!(
+            BuildProfile::Release.bundle_artifact_basename("0.1.0", "x86_64"),
+            "walle-v0.1.0-linux-x86_64"
+        );
+        assert_eq!(
+            BuildProfile::Debug.bundle_artifact_basename("0.1.0", "x86_64"),
+            "walle-v0.1.0-linux-x86_64-debug"
+        );
+        assert_eq!(BuildProfile::Release.bundle_dir_name(), "release-bundle");
+        assert_eq!(BuildProfile::Debug.bundle_dir_name(), "debug-bundle");
+        assert_eq!(BuildProfile::Release.cargo_profile_dir(), "release");
+        assert_eq!(BuildProfile::Debug.cargo_profile_dir(), "debug");
+        assert!(BuildProfile::Release.ebpf_is_release());
+        assert!(BuildProfile::Debug.ebpf_is_release());
+    }
 
     #[test]
     fn runtime_config_serialization_matches_c_layout_contract() {

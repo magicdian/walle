@@ -1,0 +1,14 @@
+[package]
+name = "walle-nss"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "nss_walle"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+walle-daemon = { path = "../walle-daemon" }
+walle-policy = { path = "../walle-policy" }

@@ -11,6 +11,8 @@ This repository now contains the phase-1 Rust workspace scaffold for:
 * `walle-common`
 * `walle-policy`
 * `walle-ebpf`
+* `walle-nss`
+* `walle-pam`
 * `xtask`
 
 The current workspace includes:
@@ -41,15 +43,28 @@ Build release artifacts:
 ```bash
 cargo run -p xtask -- build-ebpf
 cargo build -p walle-cli --release
+cargo build -p walle-nss --release
+cargo build -p walle-pam --release
 ```
 
-Create a release bundle that includes both the userspace binary and the eBPF object:
+Create a release bundle that includes the userspace binary, the eBPF object, the NSS identity-overlay module, and the PAM trap module:
 
 ```bash
 cargo run -p xtask -- build-release
 ```
 
 The bundle is written to `target/release-bundle/walle-v<version>-linux-<arch>.tar.gz`.
+
+For local validation, you can also build a debug bundle with the same contents:
+
+```bash
+cargo run -p xtask -- build-debug
+```
+
+The debug bundle is written to `target/debug-bundle/walle-v<version>-linux-<arch>-debug.tar.gz`.
+The debug bundle keeps the user-space binaries on the debug profile while still packaging the optimized release `walle-ebpf` object for loader compatibility.
+
+For end-to-end host validation from the debug bundle, see [docs/operations/debug-bundle-test-guide.md](docs/operations/debug-bundle-test-guide.md).
 
 If you prefer a shell entrypoint, `./scripts/build_release.sh` is a thin wrapper around the same `xtask` command.
 
@@ -64,6 +79,12 @@ The install flow writes:
 
 * `/usr/local/bin/walle`
 * `/usr/local/lib/walle/walle-ebpf`
+* `/lib/libnss_walle.so.2`
+* `/usr/local/lib/walle/pam_walle.so`
+* `/usr/local/lib/walle/walle-ssh-overlay.conf.sample`
+* `/usr/local/lib/walle/walle-nsswitch.conf.sample`
+* `/usr/local/lib/walle/walle-sshd-pam.conf.sample`
+* `/usr/local/lib/walle/walle-ssh-overlay-shell`
 * `/etc/walle/config.toml`
 * `/etc/systemd/system/walle.service` when `systemd` is available
 * `/usr/local/lib/walle/walle-run.sh` when `systemd` is unavailable
@@ -71,10 +92,19 @@ The install flow writes:
 After install:
 
 ```bash
+sudo ldconfig
 sudo systemctl daemon-reload
 sudo systemctl enable --now walle
 sudo systemctl status walle
 ```
+
+If you want the SSH identity overlay, manually merge:
+
+* `/usr/local/lib/walle/walle-ssh-overlay.conf.sample` into `sshd_config`
+* `/usr/local/lib/walle/walle-nsswitch.conf.sample` into `/etc/nsswitch.conf`
+* `/usr/local/lib/walle/walle-sshd-pam.conf.sample` into `/etc/pam.d/sshd`
+
+Then restart `sshd`.
 
 When `systemd` is unavailable, run the fallback script directly:
 

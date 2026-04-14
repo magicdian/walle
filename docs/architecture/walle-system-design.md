@@ -414,6 +414,8 @@ crates/
   walle-common/
   walle-policy/
   walle-ebpf/
+  walle-nss/
+  walle-pam/
 xtask/
 docs/
   architecture/
@@ -432,6 +434,10 @@ Suggested crate responsibilities:
   * control-plane rule schemas and validation
 * `walle-ebpf`
   * no-std eBPF/XDP program code
+* `walle-nss`
+  * glibc NSS identity-overlay module for runtime trap users
+* `walle-pam`
+  * PAM trap module for overlay password/account/session handling
 * `xtask`
   * build, bundle, and development automation
 

@@ -315,8 +315,10 @@ pub struct SshJailPolicy {
     pub idle_timeout_secs: u64,
     #[serde(default = "default_sshjail_max_session_duration_secs")]
     pub max_session_duration_secs: u64,
-    #[serde(default = "default_sshjail_audit_dir")]
-    pub audit_dir: String,
+    #[serde(default = "default_sshjail_root_dir", alias = "audit_dir")]
+    pub root_dir: String,
+    #[serde(default = "default_sshjail_static_blacklist_keys_path")]
+    pub static_blacklist_keys_path: String,
     #[serde(default)]
     pub hostname_strategy: SshJailHostnameStrategy,
     #[serde(default)]
@@ -331,7 +333,8 @@ impl Default for SshJailPolicy {
             max_sessions: default_sshjail_max_sessions(),
             idle_timeout_secs: default_sshjail_idle_timeout_secs(),
             max_session_duration_secs: default_sshjail_max_session_duration_secs(),
-            audit_dir: default_sshjail_audit_dir(),
+            root_dir: default_sshjail_root_dir(),
+            static_blacklist_keys_path: default_sshjail_static_blacklist_keys_path(),
             hostname_strategy: SshJailHostnameStrategy::Generated,
             fake_hostname: None,
         }
@@ -362,8 +365,12 @@ impl SshJailPolicy {
             return Err(PolicyError::InvalidSshJailSessionDuration);
         }
 
-        if self.audit_dir.trim().is_empty() {
-            return Err(PolicyError::EmptySshJailAuditDir);
+        if self.root_dir.trim().is_empty() {
+            return Err(PolicyError::EmptySshJailRootDir);
+        }
+
+        if self.static_blacklist_keys_path.trim().is_empty() {
+            return Err(PolicyError::EmptySshJailStaticBlacklistKeysPath);
         }
 
         if matches!(self.hostname_strategy, SshJailHostnameStrategy::Configured)
@@ -611,8 +618,12 @@ const fn default_sshjail_max_session_duration_secs() -> u64 {
     3_600
 }
 
-fn default_sshjail_audit_dir() -> String {
-    "/tmp/walle/gp/ssh".to_string()
+fn default_sshjail_root_dir() -> String {
+    "/tmp/walle".to_string()
+}
+
+fn default_sshjail_static_blacklist_keys_path() -> String {
+    "/etc/walle/blacklist_keys".to_string()
 }
 
 static DEFAULT_ICMP_POLICY: IcmpPolicy = IcmpPolicy {
@@ -650,8 +661,10 @@ pub enum PolicyError {
     InvalidSshJailIdleTimeout,
     #[error("sshjail max session duration must be greater than zero")]
     InvalidSshJailSessionDuration,
-    #[error("sshjail audit_dir cannot be empty")]
-    EmptySshJailAuditDir,
+    #[error("sshjail root_dir cannot be empty")]
+    EmptySshJailRootDir,
+    #[error("sshjail static_blacklist_keys_path cannot be empty")]
+    EmptySshJailStaticBlacklistKeysPath,
     #[error("sshjail fake_hostname is required when hostname_strategy is configured")]
     MissingConfiguredSshJailHostname,
     #[error("SSH log file paths cannot contain empty values")]
@@ -708,9 +721,10 @@ mod tests {
             GpTriggerMode::DecisionEmitted
         );
         assert_eq!(config.ssh_policy().gp.sshjail.listen_port, 0);
+        assert_eq!(config.ssh_policy().gp.sshjail.root_dir, "/tmp/walle");
         assert_eq!(
-            config.ssh_policy().gp.sshjail.audit_dir,
-            "/tmp/walle/gp/ssh"
+            config.ssh_policy().gp.sshjail.static_blacklist_keys_path,
+            "/etc/walle/blacklist_keys"
         );
     }
 
@@ -952,7 +966,8 @@ listen_port = 2222
 max_sessions = 64
 idle_timeout_secs = 600
 max_session_duration_secs = 3600
-audit_dir = "/tmp/walle/gp/ssh"
+root_dir = "/tmp/walle"
+static_blacklist_keys_path = "/etc/walle/blacklist_keys"
 hostname_strategy = "configured"
 fake_hostname = "web-01"
 
@@ -994,6 +1009,11 @@ enabled = true
             GpTriggerMode::DecisionEmitted
         );
         assert_eq!(config.ssh_policy().gp.sshjail.max_sessions, 64);
+        assert_eq!(config.ssh_policy().gp.sshjail.root_dir, "/tmp/walle");
+        assert_eq!(
+            config.ssh_policy().gp.sshjail.static_blacklist_keys_path,
+            "/etc/walle/blacklist_keys"
+        );
         assert_eq!(
             config.ssh_policy().gp.sshjail.hostname_strategy,
             SshJailHostnameStrategy::Configured
@@ -1002,6 +1022,34 @@ enabled = true
             config.ssh_policy().gp.sshjail.fake_hostname.as_deref(),
             Some("web-01")
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_from_toml_accepts_legacy_audit_dir_alias_for_root_dir() {
+        let path = unique_test_config_path("legacy-audit-dir");
+        let config_text = r#"
+version = 1
+
+[detectors.ssh]
+enabled = false
+failure_threshold = 5
+window_secs = 300
+ban_duration_secs = 900
+log_source_mode = "auto"
+log_file_paths = []
+
+[detectors.ssh.gp]
+enabled = false
+
+[detectors.ssh.gp.sshjail]
+audit_dir = "/var/lib/walle"
+"#;
+        fs::write(&path, config_text).expect("config fixture should be written");
+
+        let config = WalleConfig::load_from_path(&path).expect("config should parse");
+        assert_eq!(config.ssh_policy().gp.sshjail.root_dir, "/var/lib/walle");
 
         let _ = fs::remove_file(path);
     }

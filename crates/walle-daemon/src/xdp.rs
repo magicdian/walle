@@ -339,9 +339,7 @@ const fn is_xdp_mode_not_supported_errno(code: Option<i32>) -> bool {
     // Some kernels/drivers surface unsupported native/driver XDP attach from
     // `bpf_link_create` as EINVAL instead of EOPNOTSUPP/ENOTSUP.
     match code {
-        Some(errno) => {
-            errno == libc::EOPNOTSUPP || errno == libc::ENOTSUP || errno == libc::EINVAL
-        }
+        Some(errno) => errno == libc::EOPNOTSUPP || errno == libc::ENOTSUP || errno == libc::EINVAL,
         None => false,
     }
 }
@@ -589,12 +587,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[cfg(target_os = "linux")]
-    use super::{is_xdp_mode_not_supported_errno, reset_pinned_maps};
     use super::{
         bundled_object_path, default_object_path, map_pin_path_for_interface, maybe_attach,
         runtime_object_candidates,
     };
+    #[cfg(target_os = "linux")]
+    use super::{is_xdp_mode_not_supported_errno, reset_pinned_maps};
     #[cfg(target_os = "linux")]
     use walle_common::{
         MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG, MAP_NAME_CONTAIN_V4,

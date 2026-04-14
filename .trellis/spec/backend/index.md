@@ -27,6 +27,7 @@ These guidelines should be updated again after the first Rust workspace and eBPF
 | [Error Handling](./error-handling.md) | Error types, handling strategies | Bootstrapped v0 |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | Bootstrapped v0 |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | Bootstrapped v0 |
+| [SSH Overlay And Bundle Contract](./ssh-overlay-and-bundle-contract.md) | NSS/PAM/AuthorizedKeysCommand overlay, runtime state, and distribution bundle contracts | Current v1 |
 
 ---
 

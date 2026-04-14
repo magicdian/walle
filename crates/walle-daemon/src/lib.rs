@@ -11,6 +11,7 @@ pub mod gp;
 pub mod install;
 pub mod logging;
 pub mod runtime;
+pub mod ssh_overlay;
 pub mod sshjail;
 pub mod sshjail_stress;
 pub mod xdp;
@@ -32,12 +33,13 @@ use crate::runtime::{
     BanRecord, EnvironmentReport, RuntimeBackendKind, RuntimeController, RuntimeSnapshot,
     log_environment_report, verify_environment,
 };
+use crate::ssh_overlay::SshOverlayRuntimeState;
 use crate::sshjail::SshJailService;
 pub use crate::xdp::XdpError;
 use crate::xdp::{XdpAttachment, attach, map_pin_path_for_interface};
 
 const DEFAULT_SSH_POLL_INTERVAL_MS: u64 = 1_000;
-const DEFAULT_RUNTIME_LOCK_PATH: &str = "/tmp/walle.lock";
+pub(crate) const DEFAULT_RUNTIME_LOCK_PATH: &str = "/tmp/walle.lock";
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug)]
@@ -126,6 +128,7 @@ pub struct WalleDaemon {
     ssh_poll_ingestor: SshLogIngestor,
     runtimes: Vec<InterfaceRuntime>,
     ssh_jail: Option<SshJailService>,
+    ssh_overlay: Option<SshOverlayRuntimeState>,
     config: WalleConfig,
     options: DaemonOptions,
 }
@@ -167,6 +170,7 @@ impl WalleDaemon {
             ssh_poll_ingestor,
             runtimes,
             ssh_jail: None,
+            ssh_overlay: None,
             config,
             options,
         })
@@ -219,6 +223,7 @@ impl WalleDaemon {
             });
         }
 
+        self.prepare_ssh_overlay_runtime();
         self.start_sshjail_if_needed();
 
         for runtime in &mut self.runtimes {
@@ -646,6 +651,7 @@ impl WalleDaemon {
         let event = self.detector.inspect_log_line(line);
 
         if let Some(event) = event.clone() {
+            self.promote_invalid_user_overlay(&event);
             self.execute_ssh_gp_for_failure(&event, observed_at_secs);
             let decision = self
                 .apply_invalid_user_force_ban(&event, observed_at_secs)
@@ -827,6 +833,62 @@ impl WalleDaemon {
         )
     }
 
+    fn prepare_ssh_overlay_runtime(&mut self) {
+        if self.ssh_overlay.is_some() {
+            return;
+        }
+
+        let overlay = SshOverlayRuntimeState::new(&self.config.ssh_policy().gp.sshjail);
+        match overlay.prepare_runtime_state() {
+            Ok(()) => {
+                self.ssh_overlay = Some(overlay);
+            }
+            Err(error) => {
+                warn!(
+                    component = "ssh-overlay",
+                    event = "runtime_state_prepare_failed",
+                    root_dir = %self.config.ssh_policy().gp.sshjail.root_dir,
+                    error = %error,
+                    "failed to prepare SSH overlay runtime state; overlay behavior will fail open"
+                );
+            }
+        }
+    }
+
+    fn promote_invalid_user_overlay(&self, event: &SshFailureEvent) {
+        if !matches!(event.reason, SshFailureReason::InvalidUser) {
+            return;
+        }
+
+        let Some(username) = event.username.as_deref() else {
+            return;
+        };
+        let Some(overlay) = self.ssh_overlay.as_ref() else {
+            return;
+        };
+
+        match overlay.record_invalid_username(username) {
+            Ok(true) => {
+                debug!(
+                    component = "ssh-overlay",
+                    event = "trap_username_promoted",
+                    username,
+                    "promoted invalid username into the runtime SSH trap overlay"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    component = "ssh-overlay",
+                    event = "trap_username_persist_failed",
+                    username,
+                    error = %error,
+                    "failed to persist runtime SSH trap username; overlay behavior will fail open"
+                );
+            }
+        }
+    }
+
     fn log_shutdown_requested(&self, phase: &'static str, iteration: Option<u64>) {
         info!(
             component = "daemon",
@@ -846,11 +908,22 @@ impl WalleDaemon {
             .filter(|runtime| runtime.xdp.is_some())
             .count();
         let sshjail_was_running = self.ssh_jail.is_some();
+        let ssh_overlay_was_running = self.ssh_overlay.is_some();
 
         for runtime in &mut self.runtimes {
             let _ = runtime.xdp.take();
         }
         let _ = self.ssh_jail.take();
+        if let Some(overlay) = self.ssh_overlay.take()
+            && let Err(error) = overlay.clear_runtime_state()
+        {
+            warn!(
+                component = "ssh-overlay",
+                event = "runtime_state_clear_failed",
+                error = %error,
+                "failed to clear SSH overlay runtime state during shutdown"
+            );
+        }
 
         info!(
             component = "daemon",
@@ -858,6 +931,7 @@ impl WalleDaemon {
             reason,
             detached_interfaces,
             sshjail_was_running,
+            ssh_overlay_was_running,
             "daemon resources were released"
         );
     }
@@ -1104,6 +1178,13 @@ fn read_lock_owner_pid(path: &Path) -> Result<Option<u32>, RuntimeLockError> {
 
     let owner_pid = contents.trim().parse::<u32>().ok();
     Ok(owner_pid)
+}
+
+pub fn runtime_lock_is_active() -> bool {
+    read_lock_owner_pid(Path::new(DEFAULT_RUNTIME_LOCK_PATH))
+        .ok()
+        .flatten()
+        .is_some_and(process_is_alive)
 }
 
 #[cfg(target_os = "linux")]

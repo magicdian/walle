@@ -4,6 +4,8 @@ members = [
     "crates/walle-common",
     "crates/walle-daemon",
     "crates/walle-ebpf",
+    "crates/walle-nss",
+    "crates/walle-pam",
     "crates/walle-policy",
     "xtask",
 ]

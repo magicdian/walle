@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::rng;
-use russh::keys::{Algorithm, PrivateKey, PublicKey};
+use russh::keys::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId, Disconnect, MethodKind, MethodSet, Pty, SshId};
 use thiserror::Error;
@@ -19,6 +19,11 @@ use tokio::runtime::Builder;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tracing::{error, info, warn};
 use walle_policy::{SshJailHostnameStrategy, SshJailPolicy};
+
+use crate::ssh_overlay::{
+    DynamicBlacklistStore, PendingTrapRecord, SshOverlayError, SshOverlayPaths,
+    resolve_trap_identity_by_uid,
+};
 
 const OPENSSH_SERVER_ID: &str = "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5";
 const DEFAULT_OS_RELEASE: &str = "5.15.0-113-generic";
@@ -44,11 +49,11 @@ const DEFAULT_OS_RELEASE_CONTENTS: &str = concat!(
 const FREE_MEMORY_TOTAL_PROBE: &str = "free -k | awk '/^Mem:/{print $2}'";
 const OS_RELEASE_NAME_PROBE: &str =
     "cat /etc/os-release 2>/dev/null | grep -E '^(NAME|PRETTY_NAME)=' | head -1";
-const SHELL_BUILTINS: [&str; 35] = [
-    "cat", "cd", "clear", "command", "crontab", "df", "echo", "env", "exit", "free", "history",
-    "hostname", "id", "ifconfig", "ip", "last", "ls", "netstat", "nproc", "ping", "ps", "pwd",
-    "ss", "ssh", "sshd", "sudo", "su", "test", "tree", "uname", "uptime", "w", "which", "who",
-    "whoami",
+const SHELL_BUILTINS: [&str; 40] = [
+    "cat", "cd", "chattr", "chmod", "clear", "command", "crontab", "df", "echo", "env", "exit",
+    "free", "history", "hostname", "id", "ifconfig", "ip", "last", "lockr", "ls", "mkdir",
+    "netstat", "nproc", "ping", "ps", "pwd", "rm", "ss", "ssh", "sshd", "sudo", "su", "test",
+    "tree", "uname", "uptime", "w", "which", "who", "whoami",
 ];
 const SYSTEM_HOST_KEY_PATHS: [&str; 3] = [
     "/etc/ssh/ssh_host_ed25519_key",
@@ -65,14 +70,17 @@ pub struct SshJailService {
 
 impl SshJailService {
     pub fn start(policy: &SshJailPolicy) -> Result<Self, SshJailError> {
-        let audit_dir = PathBuf::from(policy.audit_dir.trim());
-        fs::create_dir_all(&audit_dir).map_err(|source| SshJailError::CreateAuditDir {
-            path: audit_dir.clone(),
-            source,
-        })?;
-
+        let storage_paths = SshOverlayPaths::from_policy(policy);
+        storage_paths.ensure_dirs()?;
         let hostname = resolve_hostname(policy)?;
-        let shared = Arc::new(SshJailShared::new(policy, hostname, audit_dir));
+        let dynamic_blacklist =
+            DynamicBlacklistStore::load(storage_paths.dynamic_blacklist_keys_path.clone());
+        let shared = Arc::new(SshJailShared::new(
+            policy,
+            hostname,
+            storage_paths,
+            dynamic_blacklist,
+        ));
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let policy = policy.clone();
@@ -102,7 +110,9 @@ impl SshJailService {
             bound_port,
             hostname = shared.hostname.as_str(),
             max_sessions = shared.max_sessions,
-            audit_dir = %shared.audit_dir.display(),
+            root_dir = %shared.storage_paths.root_dir.display(),
+            session_audit_dir = %shared.storage_paths.session_audit_dir.display(),
+            state_dir = %shared.storage_paths.state_dir.display(),
             "sshjail listener is ready"
         );
 
@@ -139,11 +149,8 @@ impl Drop for SshJailService {
 
 #[derive(Debug, Error)]
 pub enum SshJailError {
-    #[error("failed to create sshjail audit directory '{}': {source}", .path.display())]
-    CreateAuditDir {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    #[error(transparent)]
+    Overlay(#[from] SshOverlayError),
     #[error("failed to build sshjail runtime: {source}")]
     BuildRuntime { source: std::io::Error },
     #[error("failed to spawn sshjail server thread: {source}")]
@@ -166,6 +173,285 @@ pub enum SshJailError {
 pub enum SshJailSessionError {
     #[error(transparent)]
     Russh(#[from] russh::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum LocalTrapError {
+    #[error(transparent)]
+    Overlay(#[from] SshOverlayError),
+    #[error(transparent)]
+    SshJail(#[from] SshJailError),
+    #[error("missing pending SSH trap token '{token}'")]
+    MissingPendingTrap { token: String },
+    #[error("failed to read or write local trap session stdio: {source}")]
+    Io { source: std::io::Error },
+}
+
+pub fn run_local_trap_command(policy: &SshJailPolicy, token: &str) -> Result<i32, LocalTrapError> {
+    let paths = SshOverlayPaths::from_policy(policy);
+    let pending_trap = PendingTrapRecord::consume(&paths, token)?.ok_or_else(|| {
+        LocalTrapError::MissingPendingTrap {
+            token: token.to_string(),
+        }
+    })?;
+    let peer_addr = peer_addr_from_ssh_connection();
+    let session_id = next_local_trap_session_id();
+    let hostname = resolve_hostname(policy)?;
+    let audit = SessionAudit::new(paths.session_audit_dir.as_path(), session_id, peer_addr);
+    let mut shell = ShellState::new(
+        pending_trap.username.as_str(),
+        hostname.as_str(),
+        peer_addr,
+        Duration::from_secs(policy.max_session_duration_secs),
+        session_id,
+    );
+    shell.ensure_identity_home();
+
+    audit.record(
+        "connection_open",
+        format!(
+            "peer_addr={} entrypoint=sshd_overlay trigger={} token={}",
+            peer_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            pending_trap.trigger.as_str(),
+            pending_trap.token
+        ),
+    );
+    audit.record(
+        "auth_publickey",
+        format!(
+            "user={} algorithm={} fingerprint={} public_key={}",
+            pending_trap.username,
+            pending_trap.key.key_type,
+            pending_trap.key.fingerprint,
+            pending_trap.key.openssh_key
+        ),
+    );
+    audit.record("auth_succeeded", "session authenticated");
+    audit.record("channel_open_session", "channel=stdio");
+
+    let original_command = std::env::var("SSH_ORIGINAL_COMMAND")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let exit_status = if let Some(command) = original_command {
+        audit.record("exec_request", format!("channel=stdio command={command}"));
+        audit.record("command", format!("channel=stdio command={command}"));
+        execute_local_trap_command_line(&mut shell, &audit, command.as_str())?
+    } else {
+        if std::env::var("SSH_TTY").is_ok() {
+            audit.record(
+                "pty_request",
+                format!(
+                    "channel=stdio term={} cols=0 rows=0",
+                    std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string())
+                ),
+            );
+        }
+        audit.record("shell_request", "channel=stdio");
+        run_local_trap_interactive_loop(&mut shell, &audit)?
+    };
+
+    audit.record("channel_close", "channel=stdio");
+    audit.record("connection_close", "local trap session finished");
+    Ok(exit_status)
+}
+
+pub fn run_local_trap_login(policy: &SshJailPolicy) -> Result<i32, LocalTrapError> {
+    let uid = unsafe { libc::getuid() };
+    let identity = resolve_trap_identity_by_uid(policy, uid)?.ok_or_else(|| {
+        LocalTrapError::MissingPendingTrap {
+            token: format!("uid:{uid}"),
+        }
+    })?;
+    let peer_addr = peer_addr_from_ssh_connection();
+    let session_id = next_local_trap_session_id();
+    let hostname = resolve_hostname(policy)?;
+    let audit = SessionAudit::new(
+        SshOverlayPaths::from_policy(policy)
+            .session_audit_dir
+            .as_path(),
+        session_id,
+        peer_addr,
+    );
+    let mut shell = ShellState::new(
+        identity.username.as_str(),
+        hostname.as_str(),
+        peer_addr,
+        Duration::from_secs(policy.max_session_duration_secs),
+        session_id,
+    );
+    shell.ensure_identity_home();
+
+    audit.record(
+        "connection_open",
+        format!(
+            "peer_addr={} entrypoint=sshd_identity_overlay trigger=trap_username uid={uid}",
+            peer_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+    );
+    record_exposed_auth_info(&audit);
+    audit.record("auth_succeeded", "session authenticated");
+    audit.record("channel_open_session", "channel=stdio");
+
+    let original_command = std::env::var("SSH_ORIGINAL_COMMAND")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let exit_status = if let Some(command) = original_command {
+        audit.record("exec_request", format!("channel=stdio command={command}"));
+        audit.record("command", format!("channel=stdio command={command}"));
+        execute_local_trap_command_line(&mut shell, &audit, command.as_str())?
+    } else {
+        if std::env::var("SSH_TTY").is_ok() {
+            audit.record(
+                "pty_request",
+                format!(
+                    "channel=stdio term={} cols=0 rows=0",
+                    std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string())
+                ),
+            );
+        }
+        audit.record("shell_request", "channel=stdio");
+        run_local_trap_interactive_loop(&mut shell, &audit)?
+    };
+
+    audit.record("channel_close", "channel=stdio");
+    audit.record("connection_close", "local trap login finished");
+    Ok(exit_status)
+}
+
+fn execute_local_trap_command_line(
+    shell: &mut ShellState,
+    audit: &SessionAudit,
+    command: &str,
+) -> Result<i32, LocalTrapError> {
+    let result = shell.execute_line(command);
+    if result.record_history {
+        shell.record_history_entry(command);
+    }
+    for event in &result.audit_events {
+        audit.record(event.event, event.details.as_str());
+    }
+    if !result.output.is_empty() {
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(result.output.as_bytes())
+            .map_err(|source| LocalTrapError::Io { source })?;
+        stdout
+            .flush()
+            .map_err(|source| LocalTrapError::Io { source })?;
+    }
+    Ok(result.exit_status as i32)
+}
+
+fn run_local_trap_interactive_loop(
+    shell: &mut ShellState,
+    audit: &SessionAudit,
+) -> Result<i32, LocalTrapError> {
+    let stdin = std::io::stdin();
+    let mut stdin = stdin.lock();
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(shell.banner().as_bytes())
+        .and_then(|_| stdout.write_all(shell.prompt().as_bytes()))
+        .and_then(|_| stdout.flush())
+        .map_err(|source| LocalTrapError::Io { source })?;
+
+    let mut exit_status = 0i32;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes_read = stdin
+            .read_line(&mut line)
+            .map_err(|source| LocalTrapError::Io { source })?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let command = line.trim_end_matches(['\r', '\n']).trim().to_string();
+        if !command.is_empty() {
+            audit.record("command", format!("channel=stdio command={command}"));
+        }
+        let result = shell.execute_line(command.as_str());
+        if result.record_history {
+            shell.record_history_entry(command.as_str());
+        }
+        for event in &result.audit_events {
+            audit.record(event.event, event.details.as_str());
+        }
+        if !result.output.is_empty() {
+            stdout
+                .write_all(result.output.as_bytes())
+                .map_err(|source| LocalTrapError::Io { source })?;
+        }
+        exit_status = result.exit_status as i32;
+
+        if result.close_channel {
+            stdout
+                .flush()
+                .map_err(|source| LocalTrapError::Io { source })?;
+            break;
+        }
+
+        stdout
+            .write_all(shell.prompt().as_bytes())
+            .and_then(|_| stdout.flush())
+            .map_err(|source| LocalTrapError::Io { source })?;
+    }
+
+    Ok(exit_status)
+}
+
+fn peer_addr_from_ssh_connection() -> Option<SocketAddr> {
+    let connection = std::env::var("SSH_CONNECTION").ok()?;
+    let mut parts = connection.split_whitespace();
+    let ip = parts.next()?;
+    let port = parts.next()?.parse::<u16>().ok()?;
+    format!("{ip}:{port}").parse().ok()
+}
+
+fn next_local_trap_session_id() -> u64 {
+    let pid = u64::from(std::process::id());
+    unix_timestamp_secs() ^ (pid << 16)
+}
+
+fn record_exposed_auth_info(audit: &SessionAudit) {
+    let Some(path) = std::env::var("SSH_USER_AUTH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    match std::fs::read_to_string(path.as_str()) {
+        Ok(contents) => {
+            let normalized = contents
+                .lines()
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !normalized.is_empty() {
+                audit.record(
+                    "auth_info",
+                    format!("source=SSH_USER_AUTH path={path} contents={normalized}"),
+                );
+            }
+        }
+        Err(error) => {
+            audit.record(
+                "auth_info",
+                format!("source=SSH_USER_AUTH path={path} error={error}"),
+            );
+        }
+    }
+    let _ = std::fs::remove_file(path);
 }
 
 fn run_server(
@@ -313,7 +599,8 @@ fn generate_fake_hostname() -> String {
 
 struct SshJailShared {
     hostname: String,
-    audit_dir: PathBuf,
+    storage_paths: SshOverlayPaths,
+    dynamic_blacklist: DynamicBlacklistStore,
     max_sessions: usize,
     max_session_duration: Duration,
     permits: Arc<Semaphore>,
@@ -322,14 +609,20 @@ struct SshJailShared {
 }
 
 impl SshJailShared {
-    fn new(policy: &SshJailPolicy, hostname: String, audit_dir: PathBuf) -> Self {
+    fn new(
+        policy: &SshJailPolicy,
+        hostname: String,
+        storage_paths: SshOverlayPaths,
+        dynamic_blacklist: DynamicBlacklistStore,
+    ) -> Self {
         let mut auth_methods = MethodSet::empty();
         auth_methods.push(MethodKind::Password);
         auth_methods.push(MethodKind::PublicKey);
 
         Self {
             hostname,
-            audit_dir,
+            storage_paths,
+            dynamic_blacklist,
             max_sessions: policy.max_sessions,
             max_session_duration: Duration::from_secs(policy.max_session_duration_secs),
             permits: Arc::new(Semaphore::new(policy.max_sessions)),
@@ -363,7 +656,11 @@ impl russh::server::Server for SshJailServer {
         let session_id = self.shared.next_session_id();
         let permit = self.shared.try_acquire_session();
         let rejected_for_capacity = permit.is_none();
-        let audit = SessionAudit::new(self.shared.audit_dir.as_path(), session_id, peer_addr);
+        let audit = SessionAudit::new(
+            self.shared.storage_paths.session_audit_dir.as_path(),
+            session_id,
+            peer_addr,
+        );
         audit.record(
             "connection_open",
             format!(
@@ -637,6 +934,36 @@ impl SshJailHandler {
             .record("session_timeout", "max session duration reached");
         Ok(true)
     }
+
+    fn capture_inbound_public_key(&self, event: &'static str, user: &str, public_key: &PublicKey) {
+        let openssh_key = public_key
+            .to_openssh()
+            .unwrap_or_else(|_| format!("{} <encoding_failed>", public_key.algorithm().as_str()));
+        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
+        let persisted = match self.shared.dynamic_blacklist.record(openssh_key.as_str()) {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                warn!(
+                    component = "sshjail",
+                    event = "dynamic_blacklist_persist_failed",
+                    path = %self.shared.storage_paths.dynamic_blacklist_keys_path.display(),
+                    error = %error,
+                    "failed to persist dynamic SSH blacklist update"
+                );
+                false
+            }
+        };
+        self.audit.record(
+            event,
+            format!(
+                "user={user} algorithm={} fingerprint={} persisted={} public_key={}",
+                public_key.algorithm().as_str(),
+                fingerprint,
+                persisted,
+                openssh_key
+            ),
+        );
+    }
 }
 
 impl russh::server::Handler for SshJailHandler {
@@ -671,10 +998,7 @@ impl russh::server::Handler for SshJailHandler {
         user: &str,
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
-        self.audit.record(
-            "auth_publickey_offered",
-            format!("user={user} algorithm={:?}", public_key.algorithm()),
-        );
+        self.capture_inbound_public_key("auth_publickey_offered", user, public_key);
 
         if self.rejected_for_capacity {
             return Ok(self.reject_for_capacity());
@@ -689,10 +1013,7 @@ impl russh::server::Handler for SshJailHandler {
         user: &str,
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
-        self.audit.record(
-            "auth_publickey",
-            format!("user={user} algorithm={:?}", public_key.algorithm()),
-        );
+        self.capture_inbound_public_key("auth_publickey", user, public_key);
 
         if self.rejected_for_capacity {
             return Ok(self.reject_for_capacity());
@@ -1360,12 +1681,7 @@ impl ShellState {
             return CommandResult::default();
         }
 
-        let tokens = split_shell_words(trimmed);
-        if tokens.is_empty() {
-            return CommandResult::default();
-        }
-
-        self.execute_tokens(&tokens)
+        self.execute_script(trimmed)
     }
 
     fn prepare_interactive_ping(&self, line: &str) -> Option<PingRequest> {
@@ -1528,6 +1844,10 @@ impl ShellState {
             "w" => self.handle_w(),
             "who" => self.handle_who(),
             "crontab" => self.handle_crontab(args),
+            "mkdir" => self.handle_mkdir(args),
+            "rm" => self.handle_rm(args),
+            "chmod" => self.handle_chmod(args),
+            "chattr" | "lockr" => CommandResult::default(),
             "ssh" => self.handle_ssh(args),
             "sshd" => self.handle_sshd(args),
             "java" | "javac" | "python3" | "python" | "php" | "nginx" | "apache2" | "mysql" => {
@@ -1543,7 +1863,37 @@ impl ShellState {
             return result;
         }
 
-        let tokens = split_shell_words(script);
+        let commands = split_shell_commands(script);
+        if commands.is_empty() {
+            let tokens = split_shell_words(script);
+            return if tokens.is_empty() {
+                CommandResult::default()
+            } else {
+                self.execute_tokens(&tokens)
+            };
+        }
+
+        let mut last_result = CommandResult::default();
+        for (index, (command, connector)) in commands.iter().enumerate() {
+            if index > 0
+                && matches!(connector, ScriptConnector::OnSuccess)
+                && last_result.exit_status != 0
+            {
+                continue;
+            }
+
+            last_result = self.execute_single_script_command(command.as_str());
+        }
+
+        last_result
+    }
+
+    fn execute_single_script_command(&mut self, command: &str) -> CommandResult {
+        if let Some(result) = self.try_execute_echo_redirection(command) {
+            return result;
+        }
+
+        let tokens = split_shell_words(command);
         if tokens.is_empty() {
             return CommandResult::default();
         }
@@ -1622,6 +1972,42 @@ impl ShellState {
         };
         self.filesystem
             .resolve_path(self.current_identity().cwd.as_str(), expanded.as_str())
+    }
+
+    fn try_execute_echo_redirection(&mut self, command: &str) -> Option<CommandResult> {
+        let (left, append, path) = split_shell_redirection(command)?;
+        let tokens = split_shell_words(left.trim());
+        if tokens.first().map(String::as_str) != Some("echo") {
+            return None;
+        }
+
+        let resolved_path = self.resolve_virtual_path(path.trim());
+        let contents = format!("{}\n", tokens[1..].join(" "));
+        let result = if append {
+            self.filesystem
+                .append_file(resolved_path.as_str(), contents.as_str())
+        } else {
+            self.filesystem
+                .write_file(resolved_path.as_str(), contents.as_str())
+        };
+
+        Some(match result {
+            Ok(()) => CommandResult::default(),
+            Err(VirtualFilesystemWriteError::MissingParent) => CommandResult {
+                output: format!("bash: {}: No such file or directory\r\n", path.trim()),
+                close_channel: false,
+                exit_status: 1,
+                audit_events: Vec::new(),
+                record_history: true,
+            },
+            Err(VirtualFilesystemWriteError::PathIsDirectory) => CommandResult {
+                output: format!("bash: {}: Is a directory\r\n", path.trim()),
+                close_channel: false,
+                exit_status: 1,
+                audit_events: Vec::new(),
+                record_history: true,
+            },
+        })
     }
 
     fn handle_uname(&self, args: &[String]) -> String {
@@ -1990,6 +2376,125 @@ impl ShellState {
                 audit_events: Vec::new(),
                 record_history: true,
             },
+        }
+    }
+
+    fn handle_mkdir(&mut self, args: &[String]) -> CommandResult {
+        let create_parents = args.iter().any(|arg| arg == "-p");
+        let paths = args
+            .iter()
+            .filter(|arg| !arg.starts_with('-'))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return CommandResult {
+                output: "mkdir: missing operand\r\n".to_string(),
+                close_channel: false,
+                exit_status: 1,
+                audit_events: Vec::new(),
+                record_history: true,
+            };
+        }
+
+        for path in paths {
+            let resolved = self.resolve_virtual_path(path);
+            if self.filesystem.is_dir(resolved.as_str()) {
+                if create_parents {
+                    continue;
+                }
+                return CommandResult {
+                    output: format!("mkdir: cannot create directory '{}': File exists\r\n", path),
+                    close_channel: false,
+                    exit_status: 1,
+                    audit_events: Vec::new(),
+                    record_history: true,
+                };
+            }
+            if self.filesystem.is_file(resolved.as_str()) {
+                return CommandResult {
+                    output: format!("mkdir: cannot create directory '{}': File exists\r\n", path),
+                    close_channel: false,
+                    exit_status: 1,
+                    audit_events: Vec::new(),
+                    record_history: true,
+                };
+            }
+
+            self.filesystem.ensure_dir(resolved.as_str());
+        }
+
+        CommandResult::default()
+    }
+
+    fn handle_rm(&mut self, args: &[String]) -> CommandResult {
+        let force = args.iter().any(|arg| arg.contains('f'));
+        let paths = args
+            .iter()
+            .filter(|arg| !arg.starts_with('-'))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return CommandResult {
+                output: "rm: missing operand\r\n".to_string(),
+                close_channel: false,
+                exit_status: 1,
+                audit_events: Vec::new(),
+                record_history: true,
+            };
+        }
+
+        for path in paths {
+            let resolved = self.resolve_virtual_path(path);
+            if resolved == "/" {
+                return CommandResult {
+                    output: "rm: refusing to remove '/'\r\n".to_string(),
+                    close_channel: false,
+                    exit_status: 1,
+                    audit_events: Vec::new(),
+                    record_history: true,
+                };
+            }
+
+            if !self.filesystem.remove_path(resolved.as_str()) && !force {
+                return CommandResult {
+                    output: format!(
+                        "rm: cannot remove '{}': No such file or directory\r\n",
+                        path
+                    ),
+                    close_channel: false,
+                    exit_status: 1,
+                    audit_events: Vec::new(),
+                    record_history: true,
+                };
+            }
+        }
+
+        CommandResult::default()
+    }
+
+    fn handle_chmod(&mut self, args: &[String]) -> CommandResult {
+        let target = args
+            .iter()
+            .rev()
+            .find(|arg| !arg.starts_with('-') && !arg.contains('='))
+            .map(String::as_str);
+        let Some(target) = target else {
+            return CommandResult::status(1);
+        };
+        let resolved = self.resolve_virtual_path(target);
+        if self.filesystem.is_dir(resolved.as_str()) || self.filesystem.is_file(resolved.as_str()) {
+            CommandResult::default()
+        } else {
+            CommandResult {
+                output: format!(
+                    "chmod: cannot access '{}': No such file or directory\r\n",
+                    target
+                ),
+                close_channel: false,
+                exit_status: 1,
+                audit_events: Vec::new(),
+                record_history: true,
+            }
         }
     }
 
@@ -3000,6 +3505,11 @@ struct VirtualFilesystem {
     file_contents: BTreeMap<String, String>,
 }
 
+enum VirtualFilesystemWriteError {
+    MissingParent,
+    PathIsDirectory,
+}
+
 impl VirtualFilesystem {
     fn for_login_user(username: &str) -> Self {
         let mut entries = BTreeMap::new();
@@ -3437,6 +3947,85 @@ impl VirtualFilesystem {
             );
         }
         self.file_contents.insert(normalized, contents);
+    }
+
+    fn write_file(
+        &mut self,
+        path: &str,
+        contents: &str,
+    ) -> Result<(), VirtualFilesystemWriteError> {
+        let normalized = normalize_path(path);
+        if self.is_dir(normalized.as_str()) {
+            return Err(VirtualFilesystemWriteError::PathIsDirectory);
+        }
+
+        let Some(parent) = parent_dir(normalized.as_str()) else {
+            return Err(VirtualFilesystemWriteError::MissingParent);
+        };
+        if !self.is_dir(parent) {
+            return Err(VirtualFilesystemWriteError::MissingParent);
+        }
+
+        self.add_file(normalized.as_str(), contents.to_string());
+        Ok(())
+    }
+
+    fn append_file(
+        &mut self,
+        path: &str,
+        contents: &str,
+    ) -> Result<(), VirtualFilesystemWriteError> {
+        let normalized = normalize_path(path);
+        if self.is_dir(normalized.as_str()) {
+            return Err(VirtualFilesystemWriteError::PathIsDirectory);
+        }
+
+        let Some(parent) = parent_dir(normalized.as_str()) else {
+            return Err(VirtualFilesystemWriteError::MissingParent);
+        };
+        if !self.is_dir(parent) {
+            return Err(VirtualFilesystemWriteError::MissingParent);
+        }
+
+        self.entries
+            .entry(parent.to_string())
+            .or_default()
+            .push(path_basename(normalized.as_str()).to_string());
+        dedupe_entries(
+            self.entries
+                .get_mut(parent)
+                .expect("parent directory should exist"),
+        );
+        self.file_contents
+            .entry(normalized)
+            .and_modify(|existing| existing.push_str(contents))
+            .or_insert_with(|| contents.to_string());
+        Ok(())
+    }
+
+    fn remove_path(&mut self, path: &str) -> bool {
+        let normalized = normalize_path(path);
+        if normalized == "/" {
+            return false;
+        }
+
+        let existed = self.is_dir(normalized.as_str()) || self.is_file(normalized.as_str());
+        if !existed {
+            return false;
+        }
+
+        if let Some(parent) = parent_dir(normalized.as_str())
+            && let Some(entries) = self.entries.get_mut(parent)
+        {
+            entries.retain(|entry| entry != path_basename(normalized.as_str()));
+        }
+
+        let prefix = format!("{}/", normalized);
+        self.file_contents
+            .retain(|key, _| key != &normalized && !key.starts_with(prefix.as_str()));
+        self.entries
+            .retain(|key, _| key != &normalized && !key.starts_with(prefix.as_str()));
+        true
     }
 
     fn render_ls(&self, path: &str, show_hidden: bool, long_format: bool) -> Option<String> {
@@ -4125,6 +4714,91 @@ fn parse_crontab_target_user(args: &[String]) -> Option<&str> {
         .map(|window| window[1].as_str())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScriptConnector {
+    Always,
+    OnSuccess,
+}
+
+fn split_shell_commands(script: &str) -> Vec<(String, ScriptConnector)> {
+    let mut commands = Vec::new();
+    let mut start = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let chars = script.char_indices().collect::<Vec<_>>();
+    let mut next_connector = ScriptConnector::Always;
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let (offset, ch) = chars[index];
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ';' if !in_single && !in_double => {
+                let segment = script[start..offset].trim();
+                if !segment.is_empty() {
+                    commands.push((segment.to_string(), next_connector));
+                }
+                next_connector = ScriptConnector::Always;
+                start = offset + ch.len_utf8();
+            }
+            '&' if !in_single && !in_double => {
+                let next = chars.get(index + 1).map(|(_, next)| *next);
+                if next == Some('&') {
+                    let segment = script[start..offset].trim();
+                    if !segment.is_empty() {
+                        commands.push((segment.to_string(), next_connector));
+                    }
+                    next_connector = ScriptConnector::OnSuccess;
+                    let next_offset = chars[index + 1].0 + '&'.len_utf8();
+                    start = next_offset;
+                    index += 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    let segment = script[start..].trim();
+    if !segment.is_empty() {
+        commands.push((segment.to_string(), next_connector));
+    }
+
+    commands
+}
+
+fn split_shell_redirection(command: &str) -> Option<(&str, bool, &str)> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let chars = command.char_indices().collect::<Vec<_>>();
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let (offset, ch) = chars[index];
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '>' if !in_single && !in_double => {
+                let append = chars.get(index + 1).is_some_and(|(_, next)| *next == '>');
+                let rhs_start = if append {
+                    chars
+                        .get(index + 1)
+                        .map(|(next_offset, _)| next_offset + '>'.len_utf8())
+                        .unwrap_or(offset + ch.len_utf8())
+                } else {
+                    offset + ch.len_utf8()
+                };
+                return Some((&command[..offset], append, &command[rhs_start..]));
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    None
+}
+
 fn split_shell_words(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -4223,7 +4897,12 @@ mod tests {
 
     use super::{
         InputMode, OPENSSH_SERVER_ID, ShellEvent, ShellIdentity, ShellState, SshJailService,
-        VirtualFilesystem, load_server_host_key_from_paths, normalize_path,
+        VirtualFilesystem, load_server_host_key_from_paths, normalize_path, run_local_trap_command,
+        run_local_trap_login,
+    };
+    use crate::ssh_overlay::{
+        DynamicBlacklistStore, PendingTrapRecord, SshOverlayPaths, TRAP_LOGIN_SHELL_PATH,
+        TrapTriggerKind,
     };
     use rand::rng;
     use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
@@ -4371,6 +5050,30 @@ mod tests {
 
         let cat_script = shell.execute_line("cat backup.sh");
         assert!(cat_script.output.contains("rsync -a /var/www/"));
+    }
+
+    #[test]
+    fn ssh_persistence_commands_update_virtual_filesystem() {
+        let mut shell = ShellState::new("root", "web-d249", None, Duration::from_secs(600), 41);
+        let key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCtrapkey material mdrfckr";
+
+        let unlock = shell.execute_line("cd ~; chattr -ia .ssh; lockr -ia .ssh");
+        assert_eq!(unlock.exit_status, 0);
+
+        let persist = shell.execute_line(
+            format!(
+                "cd ~ && rm -rf .ssh && mkdir .ssh && echo \"{key}\">>.ssh/authorized_keys && chmod -R go= ~/.ssh && cd ~"
+            )
+            .as_str(),
+        );
+        assert_eq!(persist.exit_status, 0);
+
+        let listing = shell.execute_line("ls -la ~/.ssh");
+        assert!(listing.output.contains("authorized_keys"));
+
+        let authorized_keys = shell.execute_line("cat ~/.ssh/authorized_keys");
+        assert_eq!(authorized_keys.output, format!("{key}\r\n"));
+        assert_eq!(authorized_keys.exit_status, 0);
     }
 
     #[test]
@@ -4611,10 +5314,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let audit_dir = std::env::temp_dir().join(format!("walle-sshjail-{nanos}"));
+        let root_dir = std::env::temp_dir().join(format!("walle-sshjail-{nanos}"));
         let service = SshJailService::start(&SshJailPolicy {
             listen_port: 0,
-            audit_dir: audit_dir.to_string_lossy().to_string(),
+            root_dir: root_dir.to_string_lossy().to_string(),
             hostname_strategy: SshJailHostnameStrategy::Generated,
             ..SshJailPolicy::default()
         })
@@ -4654,5 +5357,127 @@ mod tests {
         let path = PathBuf::from("/tmp/walle-sshjail-missing-host-key");
         let loaded = load_server_host_key_from_paths(&[path]).unwrap();
         assert!(!loaded.public_key().to_openssh().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dynamic_blacklist_store_persists_and_deduplicates_keys() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root_dir = std::env::temp_dir().join(format!("walle-sshjail-store-{nanos}"));
+        let paths = SshOverlayPaths::from_policy(&SshJailPolicy {
+            root_dir: root_dir.to_string_lossy().to_string(),
+            ..SshJailPolicy::default()
+        });
+        paths.ensure_dirs().unwrap();
+
+        let store = DynamicBlacklistStore::load(paths.dynamic_blacklist_keys_path.clone());
+        let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519)
+            .unwrap()
+            .public_key()
+            .to_openssh()
+            .unwrap();
+
+        assert!(store.record(key.as_str()).unwrap());
+        assert!(!store.record(key.as_str()).unwrap());
+        assert_eq!(store.entries(), vec![key.clone()]);
+
+        let persisted = std::fs::read_to_string(paths.dynamic_blacklist_keys_path).unwrap();
+        assert_eq!(persisted, format!("{key}\n"));
+    }
+
+    #[test]
+    fn local_trap_command_executes_pending_command_and_consumes_token() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root_dir = std::env::temp_dir().join(format!("walle-local-trap-{nanos}"));
+        let policy = SshJailPolicy {
+            root_dir: root_dir.to_string_lossy().to_string(),
+            hostname_strategy: SshJailHostnameStrategy::Generated,
+            ..SshJailPolicy::default()
+        };
+        let paths = SshOverlayPaths::from_policy(&policy);
+        let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519)
+            .unwrap()
+            .public_key()
+            .to_openssh()
+            .unwrap();
+        let record = PendingTrapRecord::create(
+            &paths,
+            "root",
+            Some(0),
+            Some("/root"),
+            TrapTriggerKind::BlacklistedKey,
+            crate::ssh_overlay::PresentedPublicKey::from_authorized_keys_command(
+                key.split_whitespace().next().unwrap(),
+                key.split_whitespace().nth(1).unwrap(),
+                "",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("SSH_ORIGINAL_COMMAND", "cd /root");
+        }
+        let exit_status = run_local_trap_command(&policy, record.token.as_str()).unwrap();
+        unsafe {
+            std::env::remove_var("SSH_ORIGINAL_COMMAND");
+        }
+
+        assert_eq!(exit_status, 0);
+        assert!(
+            PendingTrapRecord::consume(&paths, record.token.as_str())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn local_trap_login_executes_overlay_identity_command() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root_dir = std::env::temp_dir().join(format!("walle-local-trap-login-{nanos}"));
+        let policy = SshJailPolicy {
+            root_dir: root_dir.to_string_lossy().to_string(),
+            hostname_strategy: SshJailHostnameStrategy::Generated,
+            ..SshJailPolicy::default()
+        };
+        let paths = SshOverlayPaths::from_policy(&policy);
+        paths.ensure_dirs().unwrap();
+
+        let uid = unsafe { libc::getuid() };
+        let identity_home = paths.trap_home_dir.join("tomcat");
+        std::fs::create_dir_all(&identity_home).unwrap();
+        std::fs::write(
+            &paths.trap_identities_path,
+            format!(
+                "tomcat\t{uid}\t{uid}\t{}\t{}\tWalle SSH trap identity\n",
+                identity_home.display(),
+                TRAP_LOGIN_SHELL_PATH
+            ),
+        )
+        .unwrap();
+
+        let exit_status = run_local_trap_login(&policy).unwrap();
+
+        assert_eq!(exit_status, 0);
+
+        let session_logs = std::fs::read_dir(&paths.session_audit_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(session_logs.len(), 1);
+        let audit = std::fs::read_to_string(&session_logs[0]).unwrap();
+        assert!(audit.contains("entrypoint=sshd_identity_overlay"));
+        assert!(audit.contains("trigger=trap_username"));
+        assert!(audit.contains("auth_succeeded session authenticated"));
+        assert!(audit.contains("channel_open_session channel=stdio"));
+        assert!(audit.contains("connection_close local trap login finished"));
     }
 }

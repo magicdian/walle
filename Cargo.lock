@@ -2481,6 +2481,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "walle-nss"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "walle-daemon",
+ "walle-policy",
+]
+
+[[package]]
+name = "walle-pam"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "walle-daemon",
+ "walle-policy",
+]
+
+[[package]]
 name = "walle-policy"
 version = "0.1.0"
 dependencies = [

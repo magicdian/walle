@@ -12,9 +12,15 @@ Normal Linux releases should ship prebuilt artifacts:
   * user-facing CLI binary
 * `walle-ebpf`
   * prebuilt XDP/eBPF object
+* `libnss_walle.so.2`
+  * NSS identity-overlay module for runtime trap users
+* `pam_walle.so`
+  * PAM trap module for overlay password and account/session success
 * release notes / install instructions
 
 Operators should not need to compile the eBPF object on the target host for normal installation.
+
+For local validation and non-production troubleshooting, `xtask build-debug` may also produce a debug bundle with the same layout under `target/debug-bundle/`. The release bundle remains the default distribution artifact. The debug bundle keeps user-space artifacts on the debug profile while packaging the optimized release `walle-ebpf` object for target-host loader compatibility. For end-to-end overlay validation, see `docs/operations/debug-bundle-test-guide.md`.
 
 ## Installed Layout
 
@@ -22,6 +28,12 @@ Operators should not need to compile the eBPF object on the target host for norm
 
 * `/usr/local/bin/walle`
 * `/usr/local/lib/walle/walle-ebpf`
+* `/lib/libnss_walle.so.2`
+* `/usr/local/lib/walle/pam_walle.so`
+* `/usr/local/lib/walle/walle-ssh-overlay.conf.sample`
+* `/usr/local/lib/walle/walle-nsswitch.conf.sample`
+* `/usr/local/lib/walle/walle-sshd-pam.conf.sample`
+* `/usr/local/lib/walle/walle-ssh-overlay-shell`
 * `/etc/walle/config.toml`
   * created only when absent
   * preserved by `walle uninstall`
@@ -69,9 +81,26 @@ Install:
    * `walle-ebpf` next to the current executable
    * `../lib/walle/walle-ebpf` relative to the current executable (`bin/walle` release layout)
    * workspace default `target/bpfel-unknown-none/release/walle-ebpf`
-3. Copy managed artifacts into the install layout.
-4. Create `/etc/walle/config.toml` if it does not already exist.
-5. Write a `systemd` unit when `systemd` is available; otherwise write a fallback runner script.
+3. Resolve the NSS module from:
+   * `libnss_walle.so.2` or `libnss_walle.so` next to the current executable
+   * `../lib/libnss_walle.so.2` relative to the current executable (`bin/walle` release layout)
+   * workspace fallbacks `target/release/libnss_walle.so` and `target/debug/libnss_walle.so`
+4. Resolve the PAM module from:
+   * `pam_walle.so` or `libpam_walle.so` next to the current executable
+   * `../lib/walle/pam_walle.so` relative to the current executable (`bin/walle` release layout)
+   * workspace fallbacks `target/release/libpam_walle.so` and `target/debug/libpam_walle.so`
+5. Copy managed artifacts into the install layout.
+6. Create `/etc/walle/config.toml` if it does not already exist.
+7. Write SSH overlay samples and the trap-login shell wrapper.
+8. Write a `systemd` unit when `systemd` is available; otherwise write a fallback runner script.
+
+The install flow intentionally does not edit `sshd_config` or `/etc/nsswitch.conf` automatically. The operator manually merges:
+
+* `/usr/local/lib/walle/walle-ssh-overlay.conf.sample` into `sshd_config`
+* `/usr/local/lib/walle/walle-nsswitch.conf.sample` into `/etc/nsswitch.conf`
+* `/usr/local/lib/walle/walle-sshd-pam.conf.sample` into `/etc/pam.d/sshd`
+
+After installing the NSS module, run `ldconfig` before enabling the overlay so the loader cache sees `libnss_walle.so.2`.
 
 Runtime (`walle run` without `--xdp-object`) follows the same executable-relative lookup order before using the workspace fallback path.
 
@@ -80,7 +109,8 @@ When attaching XDP, runtime now prefers `driver` mode first and automatically fa
 Uninstall:
 
 1. Remove managed binary, object, and service artifacts.
-2. Preserve `/etc/walle/config.toml` by default so operator policy is not destroyed.
+2. Remove managed SSH overlay assets plus the installed NSS and PAM modules.
+3. Preserve `/etc/walle/config.toml` by default so operator policy is not destroyed.
 
 ## Operator Failure Guidance
 
@@ -89,6 +119,8 @@ Common install/runtime failures and expected guidance:
 | Failure | Meaning | Operator action |
 |---------|---------|-----------------|
 | missing eBPF object | install source bundle is incomplete | build with `cargo run -p xtask -- build-ebpf` or pass `--xdp-object` |
+| missing NSS module | identity-overlay install source is incomplete | build with `cargo build -p walle-nss --release` or use a release bundle that includes `libnss_walle.so.2` |
+| missing PAM module | password/account/session trap install source is incomplete | build with `cargo build -p walle-pam --release` or use a release bundle that includes `pam_walle.so` |
 | missing root privileges | install or runtime attach is not allowed | rerun install / run as `root` |
 | missing bpffs mount | pinned map path is unavailable | mount bpffs at `/sys/fs/bpf` |
 | missing kernel BTF | current runtime path is unsupported on this host | install kernel BTF package or use a supported kernel |
