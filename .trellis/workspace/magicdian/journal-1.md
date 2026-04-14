@@ -496,3 +496,36 @@ Added 2026-04-14 14:34:36.562 (UTC+8) ERROR walle_daemon::sshjail: sshjail serve
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: Fix distro eBPF lookup and XDP fallback
+
+**Date**: 2026-04-14
+**Task**: Fix distro eBPF lookup and XDP fallback
+
+### Summary
+
+Aligned install/run eBPF object lookup with release bundle layout, added driver->skb/generic XDP fallback on ENOTSUP/EOPNOTSUPP, updated backend error-handling code-spec, and verified with cargo check plus install/xdp tests.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9944db9` | (see git log) |
+| `bf6c922` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
