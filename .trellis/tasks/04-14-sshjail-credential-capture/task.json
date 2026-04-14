@@ -38,9 +38,7 @@
   "subtasks": [],
   "children": [
     "04-14-ssh-overlay-pam-password-trap",
-    "04-14-ssh-overlay-authorized-keys-trap",
-    "04-14-ssh-overlay-install-release-integration",
-    "04-14-ssh-overlay-nss-identity-runtime"
+    "04-14-ssh-overlay-install-release-integration"
   ],
   "parent": null,
   "relatedFiles": [
