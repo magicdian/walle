@@ -1,0 +1,8 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "verify typed error boundaries"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "verify structured output and no sensitive logging"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "verify GP contract and test coverage"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "verify cross-layer consistency"}
+{"file": "crates/walle-cli/src/main.rs", "reason": "validate CLI command UX consistency"}
+{"file": "crates/walle-daemon/src/sshjail.rs", "reason": "validate no regression in sshjail behavior"}
