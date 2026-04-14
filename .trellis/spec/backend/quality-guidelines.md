@@ -244,16 +244,26 @@ Current scaffold examples:
 
 ### 1. Scope / Trigger
 
-* Trigger: Any change to `crates/walle-daemon/src/sshjail.rs` fake-shell command handling, persona filesystems, interactive REPL behavior, or SSH `exec_request` probe emulation.
+* Trigger: Any change to `crates/walle-daemon/src/sshjail.rs` fake-shell command handling, persona filesystems, interactive REPL state, streaming commands, outbound SSH observation, or SSH `exec_request` probe emulation.
 
 ### 2. Signatures
 
 * `ShellState::execute_line(&str) -> CommandResult`
 * `ShellState::execute_tokens(&[String]) -> CommandResult`
+* `ShellState::ingest_input(&[u8]) -> Vec<ShellEvent>`
+* `ShellState::prepare_interactive_ping(&str) -> Option<PingRequest>`
+* `ShellState::handle_tab_completion() -> TabCompletion`
 * `ShellState::try_execute_probe_script(&str) -> Option<CommandResult>`
+* `SshJailHandler::start_exec_ping_stream(...)`
+* `SshJailHandler::start_ping_stream(...)`
 * `ShellState::handle_cat(&[String]) -> CommandResult`
 * `ShellState::handle_ifconfig(&[String]) -> CommandResult`
 * `ShellState::handle_ip(&[String]) -> CommandResult`
+* `ShellState::handle_ps(&[String]) -> CommandResult`
+* `ShellState::handle_ss(&[String]) -> CommandResult`
+* `ShellState::handle_df(&[String]) -> CommandResult`
+* `ShellState::handle_history(&[String]) -> CommandResult`
+* `ShellState::handle_ssh(&[String]) -> CommandResult`
 * `VirtualHostFacts::populate_filesystem(&mut VirtualFilesystem)`
 * `VirtualFilesystem::ensure_identity(&ShellIdentity)`
 * `VirtualFilesystem::resolve_path(&str, &str) -> String`
@@ -261,6 +271,9 @@ Current scaffold examples:
 * `VirtualFilesystem::is_dir(&str) -> bool`
 * `VirtualFilesystem::is_file(&str) -> bool`
 * `VirtualFilesystem::read_file(&str) -> Option<&str>`
+* `parse_ping_request(&[String]) -> Option<PingRequest>`
+* `render_synthetic_ping(u64, &str, &PingRequest) -> String`
+* `parse_ssh_invocation(&[String]) -> Option<SshInvocation>`
 
 ### 3. Contracts
 
@@ -270,8 +283,12 @@ Current scaffold examples:
   * directory traversal
   * host/banner facts
   * basic network interface facts
+  * process list and listening socket views
+  * operator history and login traces
+  * runtime and web-host footprints
 * If a directory is exposed by `ls`, `cd` into that path must succeed unless the output itself is being changed in the same patch.
 * Persona home directories must be populated as traversable directory trees, not only flat `ls` output lists.
+* `cd` with no argument must return the current identity to its login home directory.
 * `cat` must distinguish three cases:
   * file -> return deterministic fake contents
   * directory -> return `Is a directory` with non-zero exit semantics
@@ -285,11 +302,42 @@ Current scaffold examples:
   * `which <tool> 2>/dev/null || command -v <tool> 2>/dev/null`
   * `test -f <path> && echo 'found'`
   * `<tool> --version 2>/dev/null || <tool> --help 2>/dev/null | head -1`
+  * `<tool> -version 2>&1 | head -1` for stderr-first tools such as `java` and `ssh`
 * Basic Ubuntu-style network inspection must stay believable:
   * `ifconfig`
   * `ifconfig <iface>`
   * `ip addr`
   * `ip addr show <iface>`
+  * `ss -lntp`
+  * `netstat -lntp`
+* The broader recon surface must stay internally consistent across related commands:
+  * `ps`
+  * `df -h`
+  * `uptime`
+  * `env`
+  * `tree`
+  * `history`
+  * `last`
+  * `w`
+  * `who`
+  * `crontab -l`
+  * `java`, `java -version`, `javac`
+  * `python`, `python3 --version`
+  * `nginx`, `apache2`, `mysql`, `php`, and Tomcat footprint reads
+* Interactive shell mode must support believable stateful behavior:
+  * `Tab` completion for command names and current-path fragments
+  * continuous `ping` that can be interrupted with `Ctrl-C`
+  * hidden-input prompts where typed secrets are not echoed
+  * lightweight Python REPL mode with prompt transitions between `>>> ` and the normal shell prompt
+  * per-session attacker history for interactive commands, including silent-success commands such as `cd`
+* Synthetic `ping` must remain fully fake:
+  * no real DNS or network traffic
+  * deterministic target resolution within a session
+  * plausible public IPv4 for domain targets
+  * latency samples in the 30-50 ms band
+* Outbound `ssh` observation is metadata-only:
+  * capture destination, username, options, forwarding count, and transcript-visible behavior
+  * never capture or store typed passwords, key contents, or equivalent secret material
 * Fake-shell support must remain no-side-effect:
   * no host command execution
   * no host PTY allocation
@@ -297,7 +345,9 @@ Current scaffold examples:
 
 ### 4. Validation & Error Matrix
 
+* valid `cd` with no argument after moving away from home -> succeeds and returns `pwd` to the login home
 * valid `cd loot` from a `root` session after `ls` lists `loot` -> succeeds and updates `pwd`
+* valid `cd boot` after `cd /` -> succeeds when `/boot` is listed
 * valid `cat credentials.txt` inside `/root/loot` -> returns deterministic fake file contents
 * valid `cat .` while current path is a directory -> returns `cat: .: Is a directory` and non-zero exit
 * missing path `cat /missing/file` -> returns `No such file or directory` and non-zero exit
@@ -305,22 +355,40 @@ Current scaffold examples:
 * valid `ifconfig lo` -> returns only loopback block
 * unknown interface `ifconfig eth9` -> returns device-not-found style failure
 * valid `bash -c 'which apt 2>/dev/null || command -v apt 2>/dev/null'` -> returns the configured fake binary path
+* valid `bash -c 'java -version 2>&1 | head -1'` -> returns a believable synthetic version header
+* valid `ss -lntp` or `netstat -lntp` -> returns a listening SSH socket view aligned with the fake process table
+* valid `ping -c 2 example.com` -> returns two synthetic replies and summary output with exit status `0`
+* valid interactive `ping example.com` -> starts a stream and only stops on `Ctrl-C` or explicit count completion
+* valid `python` -> enters Python REPL mode and changes the prompt to `>>> `
+* valid `exit()` inside Python REPL -> returns to normal shell mode
+* valid `ssh -p 2222 -i ~/.ssh/id_ed25519 deploy@example.net` -> switches to hidden-input password prompt and emits one metadata audit event
+* repeated password submissions in hidden-input mode -> return permission-denied style messages without echoing or storing the entered secret
+* `history` after interactive commands such as `ls`, `uptime`, `python`, and `cd /` -> includes those attacker-visible commands in order
+* tab completion on `his<Tab>` -> expands to `history `
+* tab completion on ambiguous command prefix such as `p<Tab>` -> shows a suggestion menu rather than choosing arbitrarily
 
 ### 5. Good/Base/Bad Cases
 
 * Good:
-  * a contained root session can `ls`, `cd loot`, `cat credentials.txt`, and inspect `ifconfig` without contradictory host facts
-  * a contained `tomcat` session still benefits from the same shared Ubuntu host facts for `bash -c` reconnaissance probes
+  * a contained root session can `ls`, `cd`, inspect `ps`, `ss`, `df`, `history`, and `cat /var/log/auth.log` without contradictory host facts
+  * a contained `tomcat` session still benefits from the same shared Ubuntu host facts for `bash -c` reconnaissance probes, runtime tooling, and service footprints
+  * an attacker can start `ping`, interrupt it with `Ctrl-C`, then immediately resume normal shell use with a clean prompt
+  * an attacker can attempt outbound `ssh` and the system records only invocation metadata while the fake prompt never reveals captured secrets
 * Base:
   * unsupported commands may still return `command not found` when they are outside the supported fake-shell contract
   * fake file contents may be static as long as they remain internally consistent
+  * lightweight REPL emulation is acceptable as long as prompt transitions and basic `print(...)` flows stay believable
 * Bad:
   * listing a directory name in `ls` while `cd` into the same path fails
   * implementing `exec_request` probe support against one data source and interactive shell paths against another
   * returning `command not found` for `cat` on a valid directory path instead of a path-type-aware error
+  * implementing `ping` by invoking host networking or leaking real resolver results
+  * recording typed outbound-SSH passwords in audit logs, session history, or captured transcript state
+  * making `ps`, `ss`, `netstat`, and `/var/log/auth.log` tell different stories about whether SSH or Tomcat is present
 
 ### 6. Tests Required
 
+* shell tests must assert `cd` with no argument returns to the login home directory
 * shell tests must assert a listed root directory is traversable and updates `pwd`
 * shell tests must assert `cat` on:
   * a fake file
@@ -329,13 +397,21 @@ Current scaffold examples:
 * shell tests must assert the real observed `bash -c` reconnaissance probes keep returning deterministic outputs
 * shell tests must assert non-root personas still share the supported probe surface
 * shell tests must assert `ifconfig` and `ip addr show <iface>` return plausible interface output and unknown interfaces fail
+* shell tests must assert `ss` / `netstat`, `ps`, `df`, `uptime`, `env`, and runtime version commands render believable outputs
+* shell tests must assert web-host config and login-trace views such as `tree /etc`, `cat /var/log/auth.log`, `last`, `who`, `history`, and `crontab -l`
+* shell tests must assert interactive history includes both visible commands and silent-success commands such as `cd`
+* shell tests must assert outbound `ssh`:
+  * emits metadata audit events
+  * transitions to hidden-input prompt mode
+  * does not echo or retain typed secrets in history
+* shell tests must assert interactive `ping` preparation and tab completion behavior
 
 ### 7. Wrong vs Correct
 
 #### Wrong
 
-* Hard-code `ls` output strings for realism while leaving the underlying virtual filesystem unable to traverse into those directories.
+* Hard-code `ls`, `ps`, `ss`, `ping`, or outbound `ssh` output strings independently, while the underlying virtual host state, interactive modes, and audit boundaries tell a different story.
 
 #### Correct
 
-* Treat fake-shell realism as a shared executable contract: directory listings, traversal, file reads, reconnaissance probes, and network inspection all derive from the same virtual host state.
+* Treat fake-shell realism as a shared executable contract: directory listings, traversal, file reads, reconnaissance probes, streaming commands, prompt state transitions, and outbound-SSH metadata observation all derive from the same virtual host state and the same no-secret, no-side-effect boundary.
