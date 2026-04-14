@@ -11,7 +11,7 @@ use core::{mem, ptr};
 use walle_common::{
     ALLOW_MAP_CAPACITY, BanEntryV4, CONFIG_MAP_CAPACITY, CONFIG_MAP_KEY, DENY_MAP_CAPACITY,
     ICMP_RULE_MAP_CAPACITY, ICMP_RULE_PAYLOAD_CAPACITY, IcmpMatchType, IcmpRule, Ipv4AddrKey,
-    Ipv6AddrKey, PacketAction, RuntimeConfig, SshContainEntry, STATS_MAP_CAPACITY, STATS_MAP_KEY,
+    Ipv6AddrKey, PacketAction, RuntimeConfig, STATS_MAP_CAPACITY, STATS_MAP_KEY, SshContainEntry,
     StatsCounters,
 };
 
@@ -176,8 +176,14 @@ fn evaluate_ipv6(ctx: &XdpContext, config: &RuntimeConfig) -> Result<PacketActio
     let is_contained = unsafe { CONTAIN_V6.get(&key).is_some() };
     record_access_hits(is_whitelisted, is_blacklisted);
     let protocol = ip.next_header;
-    let allow_contained_ssh =
-        should_allow_contained_ssh_ipv6(ctx, config, is_whitelisted, is_blacklisted, protocol, is_contained)?;
+    let allow_contained_ssh = should_allow_contained_ssh_ipv6(
+        ctx,
+        config,
+        is_whitelisted,
+        is_blacklisted,
+        protocol,
+        is_contained,
+    )?;
     let base_action = allow_contained_ssh;
     let icmp_kind = classify_ipv6_icmp_packet(ctx, protocol)?;
     let rule_hit = maybe_match_icmp_rules(

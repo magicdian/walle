@@ -16,8 +16,8 @@ use walle_common::{
     AccessMode, BanEntryV4, CONFIG_MAP_KEY, ICMP_RULE_MAP_CAPACITY, IcmpMode, IcmpRule,
     Ipv4AddrKey, Ipv6AddrKey, MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG,
     MAP_NAME_CONTAIN_V4, MAP_NAME_CONTAIN_V6, MAP_NAME_DENY_V4, MAP_NAME_DENY_V6,
-    MAP_NAME_ICMP_RULES, MAP_NAME_STATS, RuntimeConfig, STATS_MAP_KEY, StatsCounters,
-    SshContainEntry, SshContainTrigger,
+    MAP_NAME_ICMP_RULES, MAP_NAME_STATS, RuntimeConfig, STATS_MAP_KEY, SshContainEntry,
+    SshContainTrigger, StatsCounters,
 };
 use walle_policy::{InterfacePolicy, WalleConfig};
 
@@ -980,10 +980,7 @@ impl LinuxMapRepository {
         })
     }
 
-    fn expire_contains(
-        &mut self,
-        observed_at_secs: u64,
-    ) -> Result<BanExpirySummary, RuntimeError> {
+    fn expire_contains(&mut self, observed_at_secs: u64) -> Result<BanExpirySummary, RuntimeError> {
         Ok(BanExpirySummary {
             removed_v4: expire_pinned_contain_map(
                 Self::open_contain_v4_map(&self.map_pin_path)?,
@@ -1228,7 +1225,11 @@ fn is_expired_contain(entry: &SshContainEntry, observed_at_secs: u64) -> bool {
 fn manual_ban_entry(created_at_secs: u64, duration_secs: Option<u64>) -> BanEntryV4 {
     let created_at_ns = created_at_secs.saturating_mul(1_000_000_000);
     let expires_at_ns = duration_secs
-        .map(|duration| created_at_secs.saturating_add(duration).saturating_mul(1_000_000_000))
+        .map(|duration| {
+            created_at_secs
+                .saturating_add(duration)
+                .saturating_mul(1_000_000_000)
+        })
         .unwrap_or(0);
 
     BanEntryV4 {
@@ -1792,9 +1793,11 @@ mod tests {
         assert_eq!(listed[0].entry.created_at_ns, 10_000_000_000);
         assert_eq!(listed[0].entry.expires_at_ns, 40_000_000_000);
 
-        assert!(controller
-            .remove_ban(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)))
-            .unwrap());
+        assert!(
+            controller
+                .remove_ban(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)))
+                .unwrap()
+        );
         assert!(controller.list_bans().unwrap().is_empty());
     }
 

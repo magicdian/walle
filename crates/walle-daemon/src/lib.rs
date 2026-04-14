@@ -22,7 +22,9 @@ use crate::detector::{
     SshLiveIngestor, SshLiveSourceMode, SshLogIngestor, SshResolvedLogSource,
 };
 pub use crate::error::{DaemonError, RuntimeLockError};
-use crate::gp::{GpAdapterRequest, GpExecutionOutcome, GpExecutionStatus, GpExecutor, SshGpRequest};
+use crate::gp::{
+    GpAdapterRequest, GpExecutionOutcome, GpExecutionStatus, GpExecutor, SshGpRequest,
+};
 use crate::logging::format_unix_timestamp_secs;
 use crate::runtime::{
     BanRecord, EnvironmentReport, RuntimeBackendKind, RuntimeController, RuntimeSnapshot,
@@ -621,15 +623,16 @@ impl WalleDaemon {
         event: &SshFailureEvent,
         observed_at_secs: u64,
     ) -> GpExecutionOutcome {
-        let mut outcome = self
-            .gp_executor
-            .execute(GpAdapterRequest::Ssh(SshGpRequest::from_failure_event(
-                event,
-                observed_at_secs,
-            )));
+        let mut outcome =
+            self.gp_executor
+                .execute(GpAdapterRequest::Ssh(SshGpRequest::from_failure_event(
+                    event,
+                    observed_at_secs,
+                )));
 
         if matches!(outcome.status, GpExecutionStatus::Contained) {
-            let expires_at_secs = observed_at_secs.saturating_add(self.config.ssh_policy().ban_duration_secs);
+            let expires_at_secs =
+                observed_at_secs.saturating_add(self.config.ssh_policy().ban_duration_secs);
             if let Err(error) = self.apply_ssh_contain_to_all(
                 event.ip,
                 observed_at_secs,
@@ -653,11 +656,11 @@ impl WalleDaemon {
     }
 
     fn execute_ssh_gp_for_decision(&mut self, decision: &SshBanDecision) -> GpExecutionOutcome {
-        let mut outcome = self
-            .gp_executor
-            .execute(GpAdapterRequest::Ssh(SshGpRequest::from_ban_decision(
-                decision,
-            )));
+        let mut outcome =
+            self.gp_executor
+                .execute(GpAdapterRequest::Ssh(SshGpRequest::from_ban_decision(
+                    decision,
+                )));
 
         if matches!(outcome.status, GpExecutionStatus::Contained)
             && let Err(error) = self.apply_ssh_contain_to_all(
@@ -774,7 +777,10 @@ impl WalleDaemon {
     }
 
     fn requires_sshjail(&self) -> bool {
-        matches!(self.config.ssh_policy().gp.strategy, GpStrategyKind::Contain)
+        matches!(
+            self.config.ssh_policy().gp.strategy,
+            GpStrategyKind::Contain
+        )
     }
 }
 

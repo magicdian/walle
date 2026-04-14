@@ -83,8 +83,12 @@ fn build_release() -> Result<()> {
     reset_dir(&stage_root)?;
     fs::create_dir_all(stage_root.join("bin"))
         .with_context(|| format!("failed to create {}", stage_root.join("bin").display()))?;
-    fs::create_dir_all(stage_root.join("lib/walle"))
-        .with_context(|| format!("failed to create {}", stage_root.join("lib/walle").display()))?;
+    fs::create_dir_all(stage_root.join("lib/walle")).with_context(|| {
+        format!(
+            "failed to create {}",
+            stage_root.join("lib/walle").display()
+        )
+    })?;
     fs::create_dir_all(stage_root.join("share/doc/walle")).with_context(|| {
         format!(
             "failed to create {}",
@@ -106,7 +110,10 @@ fn build_release() -> Result<()> {
         &root.join("target/bpfel-unknown-none/release/walle-ebpf"),
         &stage_root.join("lib/walle/walle-ebpf"),
     )?;
-    copy_file(&root.join("README.md"), &stage_root.join("share/doc/walle/README.md"))?;
+    copy_file(
+        &root.join("README.md"),
+        &stage_root.join("share/doc/walle/README.md"),
+    )?;
     copy_file(
         &root.join("LICENSE"),
         &stage_root.join("share/doc/walle/LICENSE"),
@@ -337,7 +344,10 @@ fn default_icmp_rule_map_path() -> String {
 
 fn workspace_root() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir.parent().map(Path::to_path_buf).unwrap_or(manifest_dir)
+    manifest_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or(manifest_dir)
 }
 
 fn workspace_version(root: &Path) -> Result<String> {
@@ -387,8 +397,7 @@ fn release_arch(root: &Path) -> Result<String> {
 
 fn reset_dir(path: &Path) -> Result<()> {
     if path.exists() {
-        fs::remove_dir_all(path)
-            .with_context(|| format!("failed to remove {}", path.display()))?;
+        fs::remove_dir_all(path).with_context(|| format!("failed to remove {}", path.display()))?;
     }
     fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
     Ok(())
@@ -435,7 +444,9 @@ fn cargo_command(root: &Path, args: &[&str]) -> Command {
 }
 
 fn run_command(mut command: Command, failure_message: &str) -> Result<()> {
-    let status = command.status().with_context(|| failure_message.to_string())?;
+    let status = command
+        .status()
+        .with_context(|| failure_message.to_string())?;
     if !status.success() {
         bail!("{failure_message}");
     }

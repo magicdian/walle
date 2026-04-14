@@ -162,8 +162,20 @@ fn attach_linux(
             source,
         })?;
 
-    attach_tc_program(&mut ebpf, interface, object_path.as_path(), TC_INGRESS_PROGRAM_NAME, TcAttachType::Ingress)?;
-    attach_tc_program(&mut ebpf, interface, object_path.as_path(), TC_EGRESS_PROGRAM_NAME, TcAttachType::Egress)?;
+    attach_tc_program(
+        &mut ebpf,
+        interface,
+        object_path.as_path(),
+        TC_INGRESS_PROGRAM_NAME,
+        TcAttachType::Ingress,
+    )?;
+    attach_tc_program(
+        &mut ebpf,
+        interface,
+        object_path.as_path(),
+        TC_EGRESS_PROGRAM_NAME,
+        TcAttachType::Egress,
+    )?;
 
     info!(
         component = "xdp",
@@ -294,13 +306,14 @@ fn attach_tc_program(
             program: program_name,
             path: object_path.to_path_buf(),
         })?;
-    let program: &mut SchedClassifier = program
-        .try_into()
-        .map_err(|source| XdpError::ProgramAccess {
-            program: program_name,
-            path: object_path.to_path_buf(),
-            source,
-        })?;
+    let program: &mut SchedClassifier =
+        program
+            .try_into()
+            .map_err(|source| XdpError::ProgramAccess {
+                program: program_name,
+                path: object_path.to_path_buf(),
+                source,
+            })?;
 
     program.load().map_err(|source| XdpError::ProgramLoad {
         program: program_name,

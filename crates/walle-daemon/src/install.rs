@@ -414,9 +414,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        default_config_template, install_with_sources, join_root, uninstall, InstallOptions,
-        ServiceManager, UninstallOptions, INSTALL_BIN_RELATIVE_PATH, INSTALL_CONFIG_RELATIVE_PATH,
-        INSTALL_OBJECT_RELATIVE_PATH, INSTALL_SCRIPT_RELATIVE_PATH, INSTALL_UNIT_RELATIVE_PATH,
+        INSTALL_BIN_RELATIVE_PATH, INSTALL_CONFIG_RELATIVE_PATH, INSTALL_OBJECT_RELATIVE_PATH,
+        INSTALL_SCRIPT_RELATIVE_PATH, INSTALL_UNIT_RELATIVE_PATH, InstallOptions, ServiceManager,
+        UninstallOptions, default_config_template, install_with_sources, join_root, uninstall,
     };
 
     #[test]

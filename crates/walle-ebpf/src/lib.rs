@@ -280,8 +280,12 @@ mod tests {
 
     #[test]
     fn allow_rule_mode_drops_icmp_misses() {
-        let config =
-            RuntimeConfig::new(AccessMode::BlacklistOnly, IcmpMode::AllowRulesActive, 22, 2222);
+        let config = RuntimeConfig::new(
+            AccessMode::BlacklistOnly,
+            IcmpMode::AllowRulesActive,
+            22,
+            2222,
+        );
 
         assert_eq!(
             apply_icmp_policy(

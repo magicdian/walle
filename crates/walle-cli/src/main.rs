@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use walle_common::{AccessMode, IcmpMode};
-use walle_daemon::install::{uninstall, InstallOptions, UninstallOptions};
+use walle_daemon::install::{InstallOptions, UninstallOptions, uninstall};
 use walle_daemon::logging::{format_unix_timestamp_secs, init_tracing};
 use walle_daemon::{DaemonOptions, WalleDaemon};
 use walle_policy::{IcmpAllowRule, LogLevel, WalleConfig};

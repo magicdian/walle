@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use walle_common::{
-    AccessMode, IcmpMatchType, IcmpMode, RuntimeConfig, ICMP_RULE_PAYLOAD_CAPACITY,
+    AccessMode, ICMP_RULE_PAYLOAD_CAPACITY, IcmpMatchType, IcmpMode, RuntimeConfig,
 };
 
 pub use walle_common::IcmpRule;
@@ -688,9 +688,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        DetectorPolicies, GlobalPolicy, GpPolicy, GpStrategyKind, GpTriggerMode, IcmpAllowRule,
-        InterfaceFilters, InterfacePolicy, LogLevel, PolicyError, SshJailHostnameStrategy,
-        SshLogSourceMode, SshProtectionPolicy, WalleConfig, DEFAULT_CONFIG_PATH,
+        DEFAULT_CONFIG_PATH, DetectorPolicies, GlobalPolicy, GpPolicy, GpStrategyKind,
+        GpTriggerMode, IcmpAllowRule, InterfaceFilters, InterfacePolicy, LogLevel, PolicyError,
+        SshJailHostnameStrategy, SshLogSourceMode, SshProtectionPolicy, WalleConfig,
     };
     use walle_common::{AccessMode, IcmpMatchType, IcmpMode};
 
@@ -708,7 +708,10 @@ mod tests {
             GpTriggerMode::DecisionEmitted
         );
         assert_eq!(config.ssh_policy().gp.sshjail.listen_port, 0);
-        assert_eq!(config.ssh_policy().gp.sshjail.audit_dir, "/tmp/walle/gp/ssh");
+        assert_eq!(
+            config.ssh_policy().gp.sshjail.audit_dir,
+            "/tmp/walle/gp/ssh"
+        );
     }
 
     #[test]
