@@ -1,0 +1,50 @@
+{
+  "id": "ssh-overlay-install-release-integration",
+  "name": "ssh-overlay-install-release-integration",
+  "title": "Identity overlay install and release integration",
+  "description": "Package the NSS overlay artifacts, trap-login shell wrapper, and operator config samples in install and release flows.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": "install-release",
+  "priority": "P2",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-14",
+  "completedAt": "2026-04-14",
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-14-sshjail-credential-capture",
+  "relatedFiles": [
+    "crates/walle-daemon/src/install.rs",
+    "crates/walle-cli/src/main.rs",
+    "xtask/src/main.rs",
+    "README.md",
+    "docs/operations/linux-install-and-distribution.md"
+  ],
+  "notes": "Implemented under the parent identity-overlay task. Covers NSS module installation, trap-login shell wrapper install, release bundle packaging, and operator-facing sample fragments.",
+  "meta": {}
+}

@@ -1,0 +1,52 @@
+{
+  "id": "ssh-overlay-pam-password-trap",
+  "name": "ssh-overlay-pam-password-trap",
+  "title": "Invalid-user password trap via PAM overlay hook",
+  "description": "Complete same-connection password trapping for runtime overlay identities without affecting real-user PAM flows.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": "pam",
+  "priority": "P2",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-14",
+  "completedAt": "2026-04-14",
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-14-sshjail-credential-capture",
+  "relatedFiles": [
+    "crates/walle-daemon/src/ssh_overlay.rs",
+    "crates/walle-daemon/src/sshjail.rs",
+    "crates/walle-nss/src/lib.rs",
+    "crates/walle-pam/src/lib.rs",
+    "crates/walle-daemon/src/install.rs",
+    "crates/walle-cli/src/main.rs",
+    "xtask/src/main.rs"
+  ],
+  "notes": "Completed under the parent identity-overlay task. Covers pam_walle auth/account/session hooks, trap-only password evidence capture, fail-open real-user behavior, install samples, and release packaging.",
+  "meta": {}
+}

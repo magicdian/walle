@@ -1,0 +1,56 @@
+{
+  "id": "sshjail-credential-capture",
+  "name": "sshjail-credential-capture",
+  "title": "SSH identity overlay, key traps, and credential capture",
+  "description": "Parent task for sshjail evidence capture, OpenSSH key traps, runtime NSS identity overlay, and pending PAM password trap work.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": "cross-layer",
+  "priority": "P2",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-14",
+  "completedAt": "2026-04-14",
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "04-14-ssh-overlay-pam-password-trap",
+    "04-14-ssh-overlay-authorized-keys-trap",
+    "04-14-ssh-overlay-install-release-integration",
+    "04-14-ssh-overlay-nss-identity-runtime"
+  ],
+  "parent": null,
+  "relatedFiles": [
+    "crates/walle-daemon/src/sshjail.rs",
+    "crates/walle-daemon/src/ssh_overlay.rs",
+    "crates/walle-nss/src/lib.rs",
+    "crates/walle-daemon/src/install.rs",
+    "crates/walle-cli/src/main.rs",
+    "xtask/src/main.rs"
+  ],
+  "notes": "Completed on 2026-04-14. All five child tasks are implemented: sshjail evidence realism, AuthorizedKeysCommand trap, runtime NSS overlay, install/release integration, and PAM password-path trapping.",
+  "meta": {}
+}

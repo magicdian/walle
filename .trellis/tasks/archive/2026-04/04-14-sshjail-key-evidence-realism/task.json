@@ -1,0 +1,47 @@
+{
+  "id": "sshjail-key-evidence-realism",
+  "name": "sshjail-key-evidence-realism",
+  "title": "sshjail key evidence and virtual ssh persistence realism",
+  "description": "Capture inbound SSH key evidence in sshjail and make common .ssh persistence behavior coherent in the virtual filesystem.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": "sshjail",
+  "priority": "P2",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-14",
+  "completedAt": "2026-04-14",
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-14-sshjail-credential-capture",
+  "relatedFiles": [
+    "crates/walle-daemon/src/sshjail.rs",
+    "crates/walle-policy/src/lib.rs"
+  ],
+  "notes": "Implemented under the parent identity-overlay task. Covers inbound public-key evidence capture, dynamic blacklist promotion from sshjail, and virtual .ssh rewrite realism.",
+  "meta": {}
+}

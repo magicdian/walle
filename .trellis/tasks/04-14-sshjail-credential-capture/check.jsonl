@@ -1,0 +1,9 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify typed state persistence boundaries for dynamic blacklist storage"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify fail-open and typed errors for new sshjail storage paths"}
+{"file": "crates/walle-daemon/src/sshjail.rs", "reason": "Primary implementation file for key capture, state persistence, and shell realism"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify containment, shell fidelity, and no-side-effect boundaries remain intact"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Re-check auth overlay state flow and validation boundaries"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify structured logs do not leak secrets beyond intended inbound evidence capture"}
+{"file": "crates/walle-policy/src/lib.rs", "reason": "Policy schema and validation changes for sshjail root/state paths"}

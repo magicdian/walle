@@ -1,0 +1,48 @@
+{
+  "id": "ssh-overlay-nss-identity-runtime",
+  "name": "ssh-overlay-nss-identity-runtime",
+  "title": "Runtime NSS identity overlay and trap login entrypoint",
+  "description": "Expose runtime trap identities to sshd through NSS and provide a trap-login entrypoint for shell sessions.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": "nss",
+  "priority": "P2",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-14",
+  "completedAt": "2026-04-14",
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-14-sshjail-credential-capture",
+  "relatedFiles": [
+    "crates/walle-daemon/src/ssh_overlay.rs",
+    "crates/walle-daemon/src/sshjail.rs",
+    "crates/walle-nss/src/lib.rs"
+  ],
+  "notes": "Implemented under the parent identity-overlay task. Covers runtime invalid-user promotion, typed trap identities, NSS hooks, and the trap-login shell path.",
+  "meta": {}
+}

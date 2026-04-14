@@ -1,0 +1,47 @@
+{
+  "id": "ssh-overlay-authorized-keys-trap",
+  "name": "ssh-overlay-authorized-keys-trap",
+  "title": "OpenSSH key trap via blacklist and AuthorizedKeysCommand",
+  "description": "Use OpenSSH native hooks to route blacklisted keys and trap identities into sshjail on the same connection.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": "sshd-hook",
+  "priority": "P2",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-14",
+  "completedAt": "2026-04-14",
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-14-sshjail-credential-capture",
+  "relatedFiles": [
+    "crates/walle-daemon/src/ssh_overlay.rs",
+    "crates/walle-cli/src/main.rs"
+  ],
+  "notes": "Implemented under the parent identity-overlay task. Covers static/dynamic blacklist matching, pending trap tokens, and AuthorizedKeysCommand forced-command output.",
+  "meta": {}
+}

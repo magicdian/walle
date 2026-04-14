@@ -1,0 +1,12 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Typed state persistence and repository boundaries for dynamic blacklist storage"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Fail-open and typed error boundaries for sshjail storage and overlay integration"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "Current SSH GP contain architecture and IP-centric XDP boundaries"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "SSH jail containment, virtual shell fidelity, and GP contract updates"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Identity/auth overlay and state flow crosses sshd, policy, and sshjail layers"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Structured logging constraints for sshjail key capture and state persistence"}
+{"file": "crates/walle-policy/src/lib.rs", "reason": "Policy schema and validation changes for sshjail storage root and dynamic state"}
+{"file": "crates/walle-daemon/src/sshjail.rs", "reason": "SSH jail key capture, dynamic blacklist persistence, and .ssh mutation realism"}
+{"file": "crates/walle-cli/src/main.rs", "reason": "SSH policy-show output and stress-test path handling updates"}
+{"file": "crates/walle-daemon/src/install.rs", "reason": "Default config template path contract changes"}
