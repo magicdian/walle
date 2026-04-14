@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 16
-- **Last Active**: 2026-04-14
+- **Total Sessions**: 18
+- **Last Active**: 2026-04-15
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~563 | Active |
+| `journal-1.md` | ~662 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,8 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits |
 |---|------|-------|---------|
+| 18 | 2026-04-15 | Commit SSH overlay traps and debug bundle integration | `15727a1` |
+| 17 | 2026-04-14 | SSH overlay completion snapshot | - |
 | 16 | 2026-04-14 | Harden XDP fallback and SSH ingestion startup | `353a504` |
 | 15 | 2026-04-14 | Fix distro eBPF lookup and XDP fallback | `9944db9`, `bf6c922` |
 | 14 | 2026-04-14 | SSH GP interactive shell stress test | `782ef52`, `d27864f` |

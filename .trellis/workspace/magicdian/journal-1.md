@@ -561,3 +561,102 @@ Fixed XDP driver->skb fallback classification for EINVAL, improved journald foll
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: SSH overlay completion snapshot
+
+**Date**: 2026-04-14
+**Task**: SSH overlay completion snapshot
+
+### Summary
+
+Archived the SSH overlay task tree and recorded the completed NSS/PAM/sshjail overlay implementation before manual host validation.
+
+### Main Changes
+
+| Area | Status |
+|------|--------|
+| sshjail evidence realism | Completed |
+| AuthorizedKeysCommand trap | Completed |
+| NSS runtime identity overlay | Completed |
+| Install / release integration | Completed |
+| PAM password-path trap | Completed |
+
+**What changed in this session**:
+- Closed and archived the full `04-14-sshjail-credential-capture` task tree after confirming all five child tasks were complete.
+- Finalized the `pam_walle` module for trap-only auth/account/session success with fail-open behavior for legitimate users.
+- Kept password evidence capture scoped to trap identities via overlay `auth-info` files consumed by `sshjail`.
+- Completed installer, CLI, release bundle, and operator docs for the PAM module and `/etc/pam.d/sshd` sample fragment.
+- Added a test-safe PAM FFI stub so `cargo test -p walle-pam` does not require the local machine to provide a linkable `libpam` development package.
+
+**Validation completed before recording**:
+- `cargo test -p walle-daemon -p walle-pam -p walle-cli`
+- `cargo check -p xtask`
+
+**Important note**:
+- This journal entry is a workflow snapshot before a dedicated code commit for the current implementation changes. The code work itself is still present as a dirty worktree outside `.trellis/` metadata, by user request, so later manual verification can proceed from a known baseline without losing task history.
+
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 18: Commit SSH overlay traps and debug bundle integration
+
+**Date**: 2026-04-15
+**Task**: Commit SSH overlay traps and debug bundle integration
+
+### Summary
+
+(Add summary)
+
+### Main Changes
+
+| Area | Description |
+|------|-------------|
+| SSH overlay | Added runtime trap identities through the NSS/PAM overlay path and kept real-user SSH traffic on the native `sshd` path. |
+| sshjail integration | Routed trapped sessions into the overlay entrypoint and preserved audit evidence for password/key-triggered containment. |
+| Install and bundle | Extended install and release/debug bundle flows to include NSS/PAM artifacts, operator docs, and validation guidance. |
+| Code-spec | Added executable backend spec for overlay state layout, bundle contents, runtime boundaries, and validation/test contracts. |
+
+**Validation completed**:
+- `cargo check -p xtask`
+- `cargo test -p walle-daemon -p walle-pam -p walle-cli -p xtask`
+- `cargo test -p walle-nss -p walle-policy`
+
+**Important implementation notes**:
+- `dynamic blacklist_keys` only records SSH auth-layer public-key attempts; shell-side writes like `echo ... > ~/.ssh/authorized_keys` do not enter that path.
+- The effective validation signal for the blacklist-key path is the session audit entry with `entrypoint=sshd_overlay` and `trigger=blacklisted_key`.
+- `sshjail.root_dir` must stay at the base path (for example `/tmp/walle`) rather than the nested GP SSH state directory.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `15727a1` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
