@@ -463,3 +463,36 @@ Added graceful SIGINT/SIGTERM shutdown for walle run, explicit runtime cleanup, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: SSH GP interactive shell stress test
+
+**Date**: 2026-04-14
+**Task**: SSH GP interactive shell stress test
+
+### Summary
+
+Added 2026-04-14 14:34:36.562 (UTC+8) ERROR walle_daemon::sshjail: sshjail server thread exited component="sshjail" event="server_exit" error=failed to bind sshjail listener on 0.0.0.0:0: Operation not permitted (os error 1) with interactive shell (pty+shell) capacity probing, launch throttling, nofile-aware recommendation, memory sampling, and related tests.
+
+### Main Changes
+
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `782ef52` | (see git log) |
+| `d27864f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
