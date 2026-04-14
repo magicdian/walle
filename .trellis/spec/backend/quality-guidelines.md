@@ -239,3 +239,103 @@ Current scaffold examples:
 #### Correct
 
 * Keep invalid-user fast handling as a detector-side ban shortcut, and let GP containment decide whether later SSH attempts are redirected after the ban decision boundary.
+
+## Scenario: SSH Jail Virtual Shell Fidelity Contract
+
+### 1. Scope / Trigger
+
+* Trigger: Any change to `crates/walle-daemon/src/sshjail.rs` fake-shell command handling, persona filesystems, interactive REPL behavior, or SSH `exec_request` probe emulation.
+
+### 2. Signatures
+
+* `ShellState::execute_line(&str) -> CommandResult`
+* `ShellState::execute_tokens(&[String]) -> CommandResult`
+* `ShellState::try_execute_probe_script(&str) -> Option<CommandResult>`
+* `ShellState::handle_cat(&[String]) -> CommandResult`
+* `ShellState::handle_ifconfig(&[String]) -> CommandResult`
+* `ShellState::handle_ip(&[String]) -> CommandResult`
+* `VirtualHostFacts::populate_filesystem(&mut VirtualFilesystem)`
+* `VirtualFilesystem::ensure_identity(&ShellIdentity)`
+* `VirtualFilesystem::resolve_path(&str, &str) -> String`
+* `VirtualFilesystem::list(&str, bool) -> Option<Vec<String>>`
+* `VirtualFilesystem::is_dir(&str) -> bool`
+* `VirtualFilesystem::is_file(&str) -> bool`
+* `VirtualFilesystem::read_file(&str) -> Option<&str>`
+
+### 3. Contracts
+
+* Interactive shell behavior and `exec_request` behavior must share one virtual host model:
+  * command discovery
+  * file existence
+  * directory traversal
+  * host/banner facts
+  * basic network interface facts
+* If a directory is exposed by `ls`, `cd` into that path must succeed unless the output itself is being changed in the same patch.
+* Persona home directories must be populated as traversable directory trees, not only flat `ls` output lists.
+* `cat` must distinguish three cases:
+  * file -> return deterministic fake contents
+  * directory -> return `Is a directory` with non-zero exit semantics
+  * missing path -> return `No such file or directory` with non-zero exit semantics
+* Supported reconnaissance commands in both interactive and `bash -c '...'` forms must include:
+  * `uname -m`
+  * `uname -a`
+  * `nproc`
+  * `free -k | awk '/^Mem:/{print $2}'`
+  * `cat /etc/os-release 2>/dev/null | grep -E '^(NAME|PRETTY_NAME)=' | head -1`
+  * `which <tool> 2>/dev/null || command -v <tool> 2>/dev/null`
+  * `test -f <path> && echo 'found'`
+  * `<tool> --version 2>/dev/null || <tool> --help 2>/dev/null | head -1`
+* Basic Ubuntu-style network inspection must stay believable:
+  * `ifconfig`
+  * `ifconfig <iface>`
+  * `ip addr`
+  * `ip addr show <iface>`
+* Fake-shell support must remain no-side-effect:
+  * no host command execution
+  * no host PTY allocation
+  * no reading live command output from the real OS
+
+### 4. Validation & Error Matrix
+
+* valid `cd loot` from a `root` session after `ls` lists `loot` -> succeeds and updates `pwd`
+* valid `cat credentials.txt` inside `/root/loot` -> returns deterministic fake file contents
+* valid `cat .` while current path is a directory -> returns `cat: .: Is a directory` and non-zero exit
+* missing path `cat /missing/file` -> returns `No such file or directory` and non-zero exit
+* valid `ifconfig` -> returns loopback plus primary ethernet interface blocks
+* valid `ifconfig lo` -> returns only loopback block
+* unknown interface `ifconfig eth9` -> returns device-not-found style failure
+* valid `bash -c 'which apt 2>/dev/null || command -v apt 2>/dev/null'` -> returns the configured fake binary path
+
+### 5. Good/Base/Bad Cases
+
+* Good:
+  * a contained root session can `ls`, `cd loot`, `cat credentials.txt`, and inspect `ifconfig` without contradictory host facts
+  * a contained `tomcat` session still benefits from the same shared Ubuntu host facts for `bash -c` reconnaissance probes
+* Base:
+  * unsupported commands may still return `command not found` when they are outside the supported fake-shell contract
+  * fake file contents may be static as long as they remain internally consistent
+* Bad:
+  * listing a directory name in `ls` while `cd` into the same path fails
+  * implementing `exec_request` probe support against one data source and interactive shell paths against another
+  * returning `command not found` for `cat` on a valid directory path instead of a path-type-aware error
+
+### 6. Tests Required
+
+* shell tests must assert a listed root directory is traversable and updates `pwd`
+* shell tests must assert `cat` on:
+  * a fake file
+  * a directory
+  * a missing path
+* shell tests must assert the real observed `bash -c` reconnaissance probes keep returning deterministic outputs
+* shell tests must assert non-root personas still share the supported probe surface
+* shell tests must assert `ifconfig` and `ip addr show <iface>` return plausible interface output and unknown interfaces fail
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+* Hard-code `ls` output strings for realism while leaving the underlying virtual filesystem unable to traverse into those directories.
+
+#### Correct
+
+* Treat fake-shell realism as a shared executable contract: directory listings, traversal, file reads, reconnaissance probes, and network inspection all derive from the same virtual host state.
