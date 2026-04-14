@@ -1,0 +1,7 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify sshjail logging and audit behavior stay structured and consistent"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Check that shared probe logic is centralized instead of copy-pasted across personas"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review shell emulation safety and regression tests against security-sensitive backend quality bar"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify typed failures remain intact and no new unsafe execution path exists"}
+{"file": "crates/walle-daemon/src/sshjail.rs", "reason": "Primary implementation file for fake-shell exec and persona logic"}

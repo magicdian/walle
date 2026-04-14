@@ -1,0 +1,6 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Maintain safe GP/sshjail behavior and add regression coverage for shell emulation changes"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Preserve stable sshjail audit and structured logging behavior while expanding command emulation"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Extract shared command and host-fact logic instead of duplicating persona-specific probe handling"}
+{"file": "crates/walle-daemon/src/sshjail.rs", "reason": "Existing fake shell, persona, filesystem, and exec_request handling to extend"}
