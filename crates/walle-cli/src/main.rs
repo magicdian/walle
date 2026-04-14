@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -143,6 +144,34 @@ enum SshCommand {
         start_at_secs: u64,
         #[arg(long, default_value_t = 1)]
         step_secs: u64,
+    },
+    Gp {
+        #[command(subcommand)]
+        command: SshGpCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SshGpCommand {
+    StressTest {
+        #[arg(long, default_value_t = 1_024)]
+        max_sessions: usize,
+        #[arg(long, default_value_t = 1_024)]
+        target_sessions: usize,
+        #[arg(long, default_value_t = 30)]
+        hold_secs: u64,
+        #[arg(long, default_value_t = 20)]
+        launch_interval_ms: u64,
+        #[arg(long, default_value_t = 500)]
+        sample_interval_ms: u64,
+        #[arg(long, default_value_t = 5_000)]
+        connect_timeout_ms: u64,
+        #[arg(long, default_value_t = 0)]
+        listen_port: u16,
+        #[arg(long)]
+        audit_dir: Option<PathBuf>,
+        #[arg(long, default_value = "root")]
+        username: String,
     },
 }
 
@@ -610,8 +639,107 @@ fn handle_ssh(command: SshCommand) -> Result<()> {
             let summary = daemon.replay_ssh_log_file(path, start_at_secs, step_secs)?;
             print_ingest_summary(&summary);
         }
+        SshCommand::Gp { command } => handle_ssh_gp(command)?,
     }
 
+    Ok(())
+}
+
+fn handle_ssh_gp(command: SshGpCommand) -> Result<()> {
+    match command {
+        SshGpCommand::StressTest {
+            max_sessions,
+            target_sessions,
+            hold_secs,
+            launch_interval_ms,
+            sample_interval_ms,
+            connect_timeout_ms,
+            listen_port,
+            audit_dir,
+            username,
+        } => {
+            let config = load_default_config("walle ssh gp stress-test")?;
+            let mut policy = config.ssh_policy().gp.sshjail.clone();
+            policy.max_sessions = max_sessions;
+            policy.listen_port = listen_port;
+            if let Some(path) = audit_dir {
+                policy.audit_dir = path.display().to_string();
+            } else {
+                let nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                policy.audit_dir = std::env::temp_dir()
+                    .join(format!("walle-sshjail-stress-{nanos}"))
+                    .display()
+                    .to_string();
+            }
+
+            let report = walle_daemon::sshjail_stress::run_sshjail_stress_test(
+                &policy,
+                walle_daemon::sshjail_stress::SshJailStressOptions {
+                    target_sessions,
+                    max_sessions,
+                    hold_secs,
+                    launch_interval_ms,
+                    sample_interval_ms,
+                    connect_timeout_ms,
+                    username,
+                },
+            )?;
+
+            println!("ssh_gp_stress_test: completed");
+            println!("bound_port: {}", report.bound_port);
+            println!("target_sessions: {}", report.target_sessions);
+            println!("max_sessions: {}", report.max_sessions);
+            println!("attempted_sessions: {}", report.attempted_sessions);
+            println!("established_sessions: {}", report.established_sessions);
+            println!("failed_sessions: {}", report.failed_sessions);
+            println!(
+                "observed_max_interactive_shells: {}",
+                report.observed_max_interactive_shells
+            );
+            if let Some(soft) = report.nofile_soft_limit {
+                println!("nofile_soft_limit: {soft}");
+            }
+            if let Some(hard) = report.nofile_hard_limit {
+                println!("nofile_hard_limit: {hard}");
+            }
+            println!("memory_total_kb: {}", report.memory_total_kb);
+            println!("memory_budget_50pct_kb: {}", report.memory_budget_50pct_kb);
+            println!("baseline_available_kb: {}", report.baseline_available_kb);
+            println!("min_available_kb: {}", report.min_available_kb);
+            println!("peak_consumed_kb: {}", report.peak_consumed_kb);
+            println!("per_session_kb: {}", report.per_session_kb);
+            if let Some(estimated) = report.estimated_fd_per_session {
+                println!("estimated_fd_per_session: {estimated}");
+            }
+            if let Some(recommended) = report.recommended_by_nofile_50pct {
+                println!("recommended_by_nofile_50pct: {recommended}");
+            }
+            println!(
+                "recommended_max_sessions: {}",
+                report.recommended_max_sessions
+            );
+            println!(
+                "recommended_max_sessions_capped: {}",
+                report.recommended_max_sessions_capped
+            );
+            println!(
+                "recommended_max_sessions_final: {}",
+                report.recommended_max_sessions_final
+            );
+            if !report.failure_samples.is_empty() {
+                println!("failure_samples: {}", report.failure_samples.len());
+                for sample in &report.failure_samples {
+                    println!("failure_sample: {sample}");
+                }
+            }
+            println!(
+                "note: recommendation now prefers the tighter bound between 50% memory budget and 50% open-file budget (when detectable)"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -670,4 +798,130 @@ fn handle_icmp(command: IcmpCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command, SshCommand, SshGpCommand};
+
+    #[test]
+    fn ssh_gp_stress_test_parses_defaults() {
+        let cli = Cli::parse_from(["walle", "ssh", "gp", "stress-test"]);
+        let Command::Ssh(args) = cli.command else {
+            panic!("expected ssh command");
+        };
+        let SshCommand::Gp { command } = args.command else {
+            panic!("expected ssh gp subcommand");
+        };
+        let (
+            max_sessions,
+            target_sessions,
+            hold_secs,
+            launch_interval_ms,
+            sample_interval_ms,
+            connect_timeout_ms,
+            listen_port,
+        ) = match command {
+            SshGpCommand::StressTest {
+                max_sessions,
+                target_sessions,
+                hold_secs,
+                launch_interval_ms,
+                sample_interval_ms,
+                connect_timeout_ms,
+                listen_port,
+                ..
+            } => (
+                max_sessions,
+                target_sessions,
+                hold_secs,
+                launch_interval_ms,
+                sample_interval_ms,
+                connect_timeout_ms,
+                listen_port,
+            ),
+        };
+
+        assert_eq!(max_sessions, 1_024);
+        assert_eq!(target_sessions, 1_024);
+        assert_eq!(hold_secs, 30);
+        assert_eq!(launch_interval_ms, 20);
+        assert_eq!(sample_interval_ms, 500);
+        assert_eq!(connect_timeout_ms, 5_000);
+        assert_eq!(listen_port, 0);
+    }
+
+    #[test]
+    fn ssh_gp_stress_test_parses_custom_values() {
+        let cli = Cli::parse_from([
+            "walle",
+            "ssh",
+            "gp",
+            "stress-test",
+            "--max-sessions",
+            "1024",
+            "--target-sessions",
+            "800",
+            "--hold-secs",
+            "45",
+            "--launch-interval-ms",
+            "50",
+            "--sample-interval-ms",
+            "200",
+            "--connect-timeout-ms",
+            "8000",
+            "--listen-port",
+            "2222",
+            "--username",
+            "admin",
+        ]);
+        let Command::Ssh(args) = cli.command else {
+            panic!("expected ssh command");
+        };
+        let SshCommand::Gp { command } = args.command else {
+            panic!("expected ssh gp subcommand");
+        };
+        let (
+            max_sessions,
+            target_sessions,
+            hold_secs,
+            launch_interval_ms,
+            sample_interval_ms,
+            connect_timeout_ms,
+            listen_port,
+            username,
+        ) = match command {
+            SshGpCommand::StressTest {
+                max_sessions,
+                target_sessions,
+                hold_secs,
+                launch_interval_ms,
+                sample_interval_ms,
+                connect_timeout_ms,
+                listen_port,
+                username,
+                ..
+            } => (
+                max_sessions,
+                target_sessions,
+                hold_secs,
+                launch_interval_ms,
+                sample_interval_ms,
+                connect_timeout_ms,
+                listen_port,
+                username,
+            ),
+        };
+
+        assert_eq!(max_sessions, 1_024);
+        assert_eq!(target_sessions, 800);
+        assert_eq!(hold_secs, 45);
+        assert_eq!(launch_interval_ms, 50);
+        assert_eq!(sample_interval_ms, 200);
+        assert_eq!(connect_timeout_ms, 8_000);
+        assert_eq!(listen_port, 2_222);
+        assert_eq!(username, "admin");
+    }
 }

@@ -12,6 +12,7 @@ pub mod install;
 pub mod logging;
 pub mod runtime;
 pub mod sshjail;
+pub mod sshjail_stress;
 pub mod xdp;
 
 use tracing::{debug, info, warn};
