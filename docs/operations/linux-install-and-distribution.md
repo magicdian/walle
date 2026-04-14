@@ -67,10 +67,15 @@ Install:
 2. Resolve the eBPF object from:
    * `--xdp-object <path>`, if provided
    * `walle-ebpf` next to the current executable
+   * `../lib/walle/walle-ebpf` relative to the current executable (`bin/walle` release layout)
    * workspace default `target/bpfel-unknown-none/release/walle-ebpf`
 3. Copy managed artifacts into the install layout.
 4. Create `/etc/walle/config.toml` if it does not already exist.
 5. Write a `systemd` unit when `systemd` is available; otherwise write a fallback runner script.
+
+Runtime (`walle run` without `--xdp-object`) follows the same executable-relative lookup order before using the workspace fallback path.
+
+When attaching XDP, runtime now prefers `driver` mode first and automatically falls back to `skb/generic` if the interface reports mode-not-supported (`EOPNOTSUPP` / `ENOTSUP`).
 
 Uninstall:
 

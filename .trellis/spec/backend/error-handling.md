@@ -199,9 +199,13 @@ Current scaffold examples:
 
 * `walle install [--root <path>] [--xdp-object <path>]`
 * `walle uninstall [--root <path>]`
+* `walle run [--interface <name>] [--xdp-object <path>]`
 * `install::install(InstallOptions) -> Result<InstallReport, InstallError>`
 * `install::uninstall(UninstallOptions) -> Result<UninstallReport, InstallError>`
+* `install::resolve_xdp_object(Option<&Path>, &Path) -> Result<PathBuf, InstallError>`
 * `WalleDaemon::startup() -> Result<(), DaemonError>`
+* `xdp::attach(&str, Option<&Path>, Option<&Path>) -> Result<XdpAttachment, XdpError>`
+* `xdp::attach_xdp_program_with_fallback(&mut Xdp, &str) -> Result<&'static str, XdpError>`
 * `WalleDaemon::add_manual_ban(...) -> Result<(), DaemonError>`
 * `WalleDaemon::list_bans() -> Result<BanStatusSnapshot, DaemonError>`
 * `cargo run -p xtask -- build-release`
@@ -211,6 +215,12 @@ Current scaffold examples:
 * Install / uninstall failures must stay in the installer boundary as typed `InstallError` values until the CLI renders them.
 * Installing into `/` without root privileges must fail explicitly; do not attempt partial writes and do not silently downgrade the target path.
 * Missing eBPF release objects during install must mention the searched paths and the operator remediation path.
+* Install and runtime default object lookup must search in this order when `--xdp-object` is absent:
+  * `walle-ebpf` next to the current executable
+  * `../lib/walle/walle-ebpf` relative to the current executable when binary path is `.../bin/walle`
+  * workspace fallback `target/bpfel-unknown-none/release/walle-ebpf`
+* Runtime XDP attach must prefer `driver` mode first and fallback to `skb/generic` only when driver mode returns `EOPNOTSUPP`/`ENOTSUP`.
+* If both driver and fallback attach fail, error text must preserve both failure causes (`driver_error`, `generic_error`) for operator diagnosis.
 * `WalleDaemon::startup()` must fail fast with `DaemonError::EnvironmentIncompatible` when compatibility checks contain any hard failures.
 * Ban commands that require active pinned maps must fail with `DaemonError::NoActiveRuntime` instead of pretending the action succeeded.
 * `xtask build-release` must fail if either:
@@ -223,7 +233,12 @@ Current scaffold examples:
 * non-Linux host install request -> `InstallError::UnsupportedHost`
 * install into `/` without root -> `InstallError::MissingPrivileges`
 * explicit `--xdp-object` path missing -> `InstallError::MissingXdpObject`
+* implicit install object lookup miss (adjacent + bundled + workspace all missing) -> `InstallError::MissingXdpObject` with full `searched` list
 * startup with missing bpffs / missing BTF / unsupported kernel / missing privileges -> `DaemonError::EnvironmentIncompatible`
+* runtime implicit object lookup miss -> `XdpError::MissingObject` with full `searched` list
+* runtime driver attach returns `EOPNOTSUPP` / `ENOTSUP` -> emit fallback warning and retry in `skb/generic`
+* runtime driver attach fails with non-mode-support error -> fail with `XdpError::ProgramAttach` (`mode = "driver"`)
+* runtime driver attach mode-not-supported and fallback attach also fails -> `XdpError::ProgramAttachFallback`
 * `walle ban list` with no active runtime backend -> `DaemonError::NoActiveRuntime`
 * `xtask build-release` userspace build failure -> command exits non-zero with release-build context
 * `xtask build-release` eBPF build failure -> command exits non-zero with eBPF-build context
@@ -234,6 +249,7 @@ Current scaffold examples:
 * Good:
   * installing with a valid binary + eBPF object returns concrete output paths and selected service-manager mode.
   * startup on an unsupported host fails before attempting XDP attach and prints actionable compatibility details.
+  * on cloud interfaces without driver support, runtime logs one fallback warning and attaches successfully in `skb/generic` mode.
   * `cargo run -p xtask -- build-release` produces one bundle that always contains both `walle` and `walle-ebpf`.
 * Base:
   * uninstall can succeed even when some managed files are already absent.
@@ -241,12 +257,19 @@ Current scaffold examples:
 * Bad:
   * allowing install to partially copy files before returning a vague permission error.
   * letting startup continue after a known compatibility failure and only surfacing the problem later in the attach path.
+  * failing immediately on driver-mode `ENOTSUP` without attempting a generic fallback on interfaces that support only `skb/generic`.
   * publishing a release artifact that contains the userspace binary but omits the eBPF object.
 
 ### 6. Tests Required
 
 * installer tests must assert systemd asset generation, config preservation, and uninstall cleanup behavior.
+* installer and runtime path-resolution tests must assert bundled layout lookup (`bin/walle` + `lib/walle/walle-ebpf`) before workspace fallback.
 * daemon tests or review must confirm startup returns a typed compatibility error before XDP attach on failed environment checks.
+* XDP tests or review must confirm:
+  * driver attach path is attempted first
+  * `ENOTSUP` / `EOPNOTSUPP` triggers fallback to `skb/generic`
+  * fallback success logs selected `xdp_mode`
+  * dual-failure surfaces `ProgramAttachFallback`
 * manual validation must cover `cargo run -p xtask -- build-release` and confirm the produced archive includes both `bin/walle` and `lib/walle/walle-ebpf`.
 * shell wrapper validation must keep `scripts/build_release.sh` as a thin pass-through to the `xtask` command.
 
@@ -255,7 +278,8 @@ Current scaffold examples:
 #### Wrong
 
 * Rely on README instructions alone and assume release engineering will remember to include the eBPF object next to the userspace binary.
+* Assume all Linux 5.15 hosts can attach XDP in driver mode without interface-level capability fallback.
 
 #### Correct
 
-* Encode release bundling and installer failure behavior as typed contracts: build both artifacts together, fail early on compatibility issues, and keep remediation guidance in the error text.
+* Encode release bundling and installer/runtime attach behavior as typed contracts: deterministic object lookup, driver-first attach with explicit `skb/generic` fallback for mode-not-supported errors, and actionable diagnostics when attach still fails.

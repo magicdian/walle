@@ -1,3 +1,4 @@
+use std::env;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -15,7 +16,10 @@ use std::fs;
 #[cfg(target_os = "linux")]
 use aya::{
     Ebpf, EbpfError, EbpfLoader,
-    programs::{ProgramError, SchedClassifier, TcAttachType, Xdp, XdpFlags, tc},
+    programs::{
+        ProgramError, SchedClassifier, TcAttachType, Xdp, XdpError as AyaXdpAttachError, XdpFlags,
+        tc,
+    },
 };
 
 pub struct XdpAttachment {
@@ -83,19 +87,25 @@ pub fn attach(
     object_path: Option<&Path>,
     map_pin_path: Option<&Path>,
 ) -> Result<XdpAttachment, XdpError> {
-    let object_path = object_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(default_object_path);
+    let (object_path, searched) = object_path
+        .map(|path| {
+            let path = path.to_path_buf();
+            (path.clone(), vec![path])
+        })
+        .unwrap_or_else(resolve_default_object_path);
     let map_pin_path = map_pin_path_for_interface(interface, map_pin_path);
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (interface, object_path, map_pin_path);
+        let _ = (interface, object_path, map_pin_path, searched);
         return Err(XdpError::UnsupportedHost);
     }
 
     if !object_path.exists() {
-        return Err(XdpError::MissingObject { path: object_path });
+        return Err(XdpError::MissingObject {
+            path: object_path,
+            searched,
+        });
     }
 
     #[cfg(target_os = "linux")]
@@ -125,6 +135,50 @@ pub fn maybe_attach(
 #[must_use]
 pub fn default_object_path() -> PathBuf {
     workspace_root().join("target/bpfel-unknown-none/release/walle-ebpf")
+}
+
+fn resolve_default_object_path() -> (PathBuf, Vec<PathBuf>) {
+    let searched = default_runtime_object_candidates();
+    let resolved = searched
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
+        .unwrap_or_else(|| searched[0].clone());
+    (resolved, searched)
+}
+
+fn default_runtime_object_candidates() -> Vec<PathBuf> {
+    let current_executable = env::current_exe().ok();
+    runtime_object_candidates(current_executable.as_deref())
+}
+
+fn runtime_object_candidates(current_executable: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(executable) = current_executable {
+        if let Some(parent) = executable.parent() {
+            push_unique(&mut candidates, parent.join("walle-ebpf"));
+        }
+        if let Some(path) = bundled_object_path(executable) {
+            push_unique(&mut candidates, path);
+        }
+    }
+    push_unique(&mut candidates, default_object_path());
+    candidates
+}
+
+pub(crate) fn bundled_object_path(current_executable: &Path) -> Option<PathBuf> {
+    let executable_dir = current_executable.parent()?;
+    if executable_dir.file_name().and_then(|name| name.to_str()) != Some("bin") {
+        return None;
+    }
+    let bundle_root = executable_dir.parent()?;
+    Some(bundle_root.join("lib/walle/walle-ebpf"))
+}
+
+fn push_unique(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !candidates.contains(&candidate) {
+        candidates.push(candidate);
+    }
 }
 
 #[must_use]
@@ -189,13 +243,7 @@ fn attach_linux(
         path: object_path.clone(),
         source,
     })?;
-    program
-        .attach(interface, XdpFlags::default())
-        .map_err(|source| XdpError::ProgramAttach {
-            program: XDP_PROGRAM_NAME,
-            interface: interface.to_string(),
-            source,
-        })?;
+    let xdp_mode = attach_xdp_program_with_fallback(program, interface)?;
 
     attach_tc_program(
         &mut ebpf,
@@ -217,6 +265,7 @@ fn attach_linux(
         event = "attached",
         interface,
         program = XDP_PROGRAM_NAME,
+        xdp_mode,
         object_path = %object_path.display(),
         map_pin_path = %map_pin_path.display(),
         "attached XDP program to interface"
@@ -228,6 +277,63 @@ fn attach_linux(
         map_pin_path,
         ebpf: Some(ebpf),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn attach_xdp_program_with_fallback(
+    program: &mut Xdp,
+    interface: &str,
+) -> Result<&'static str, XdpError> {
+    match program.attach(interface, XdpFlags::DRV_MODE) {
+        Ok(_) => Ok("driver"),
+        Err(driver_error) => {
+            if !is_xdp_mode_not_supported(&driver_error) {
+                return Err(XdpError::ProgramAttach {
+                    kind: "XDP",
+                    program: XDP_PROGRAM_NAME,
+                    interface: interface.to_string(),
+                    mode: "driver",
+                    source: driver_error,
+                });
+            }
+
+            warn!(
+                component = "xdp",
+                event = "attach_fallback",
+                interface,
+                from_mode = "driver",
+                to_mode = "skb/generic",
+                error = %driver_error,
+                "driver XDP mode is not supported on the interface; falling back to skb/generic mode"
+            );
+
+            program
+                .attach(interface, XdpFlags::SKB_MODE)
+                .map_err(|generic_error| XdpError::ProgramAttachFallback {
+                    program: XDP_PROGRAM_NAME,
+                    interface: interface.to_string(),
+                    driver_error,
+                    generic_error,
+                })?;
+
+            Ok("skb/generic")
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_xdp_mode_not_supported(error: &ProgramError) -> bool {
+    match error {
+        ProgramError::SyscallError(syscall) => {
+            let code = syscall.io_error.raw_os_error();
+            code == Some(libc::EOPNOTSUPP) || code == Some(libc::ENOTSUP)
+        }
+        ProgramError::XdpError(AyaXdpAttachError::NetlinkError { io_error }) => {
+            let code = io_error.raw_os_error();
+            code == Some(libc::EOPNOTSUPP) || code == Some(libc::ENOTSUP)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -358,8 +464,10 @@ fn attach_tc_program(
     program
         .attach(interface, attach_type)
         .map_err(|source| XdpError::ProgramAttach {
+            kind: "tc",
             program: program_name,
             interface: interface.to_string(),
+            mode: tc_attach_type_name(attach_type),
             source,
         })?;
 
@@ -378,9 +486,17 @@ fn attach_tc_program(
 #[derive(Debug, Error)]
 pub enum XdpError {
     #[error(
-        "BPF object file '{path}' was not found; build it with `cargo run -p xtask -- build-ebpf` or pass `--xdp-object`"
+        "BPF object file '{path}' was not found; searched: {}. build it with `cargo run -p xtask -- build-ebpf`, ship it next to the binary or under `../lib/walle/walle-ebpf` relative to the binary, or pass `--xdp-object`",
+        .searched
+            .iter()
+            .map(|candidate| candidate.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     )]
-    MissingObject { path: PathBuf },
+    MissingObject {
+        path: PathBuf,
+        searched: Vec<PathBuf>,
+    },
     #[error("failed to create map pin directory '{path}': {source}")]
     CreatePinPath {
         path: PathBuf,
@@ -414,11 +530,25 @@ pub enum XdpError {
         source: ProgramError,
     },
     #[cfg(target_os = "linux")]
-    #[error("failed to attach XDP program '{program}' to interface '{interface}': {source}")]
+    #[error(
+        "failed to attach {kind} program '{program}' to interface '{interface}' using {mode} mode: {source}"
+    )]
     ProgramAttach {
+        kind: &'static str,
         program: &'static str,
         interface: String,
+        mode: &'static str,
         source: ProgramError,
+    },
+    #[cfg(target_os = "linux")]
+    #[error(
+        "failed to attach XDP program '{program}' to interface '{interface}' in driver mode ({driver_error}); fallback to skb/generic mode failed: {generic_error}"
+    )]
+    ProgramAttachFallback {
+        program: &'static str,
+        interface: String,
+        driver_error: ProgramError,
+        generic_error: ProgramError,
     },
     #[cfg(target_os = "linux")]
     #[error("failed to add clsact qdisc to interface '{interface}': {source}")]
@@ -451,7 +581,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use super::reset_pinned_maps;
-    use super::{default_object_path, map_pin_path_for_interface, maybe_attach};
+    use super::{
+        bundled_object_path, default_object_path, map_pin_path_for_interface, maybe_attach,
+        runtime_object_candidates,
+    };
     #[cfg(target_os = "linux")]
     use walle_common::{
         MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG, MAP_NAME_CONTAIN_V4,
@@ -463,6 +596,36 @@ mod tests {
     fn default_object_path_points_to_workspace_target() {
         let path = default_object_path();
         assert!(path.ends_with("target/bpfel-unknown-none/release/walle-ebpf"));
+    }
+
+    #[test]
+    fn bundled_object_path_resolves_from_bin_layout() {
+        let current_executable = Path::new("/tmp/walle-release/bin/walle");
+        let bundled = bundled_object_path(current_executable).unwrap();
+        assert_eq!(
+            bundled,
+            Path::new("/tmp/walle-release/lib/walle/walle-ebpf")
+        );
+    }
+
+    #[test]
+    fn runtime_object_candidates_include_bundle_layout() {
+        let current_executable = Path::new("/tmp/walle-release/bin/walle");
+        let candidates = runtime_object_candidates(Some(current_executable));
+
+        assert_eq!(
+            candidates[0],
+            Path::new("/tmp/walle-release/bin/walle-ebpf")
+        );
+        assert_eq!(
+            candidates[1],
+            Path::new("/tmp/walle-release/lib/walle/walle-ebpf")
+        );
+        assert!(
+            candidates.iter().any(
+                |candidate| candidate.ends_with("target/bpfel-unknown-none/release/walle-ebpf")
+            )
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::xdp::default_object_path;
+use crate::xdp::{bundled_object_path, default_object_path};
 use thiserror::Error;
 
 const INSTALL_BIN_RELATIVE_PATH: &str = "usr/local/bin/walle";
@@ -191,10 +191,18 @@ fn resolve_xdp_object(
     let adjacent = current_executable
         .parent()
         .map(|parent| parent.join("walle-ebpf"));
+    let bundled = bundled_object_path(current_executable);
     let workspace_default = default_object_path();
     let mut searched = Vec::new();
 
     if let Some(path) = adjacent {
+        searched.push(path.clone());
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    if let Some(path) = bundled {
         searched.push(path.clone());
         if path.exists() {
             return Ok(path);
@@ -377,7 +385,7 @@ pub enum InstallError {
     #[error("failed to resolve the current walle executable: {source}")]
     CurrentExecutable { source: std::io::Error },
     #[error(
-        "failed to find the eBPF object to install; searched: {}. build it with `cargo run -p xtask -- build-ebpf`, place `walle-ebpf` next to the binary, or pass `--xdp-object`",
+        "failed to find the eBPF object to install; searched: {}. build it with `cargo run -p xtask -- build-ebpf`, place `walle-ebpf` next to the binary or under `../lib/walle/walle-ebpf` relative to the binary, or pass `--xdp-object`",
         .searched
             .iter()
             .map(|path| path.display().to_string())
@@ -416,8 +424,10 @@ mod tests {
     use super::{
         INSTALL_BIN_RELATIVE_PATH, INSTALL_CONFIG_RELATIVE_PATH, INSTALL_OBJECT_RELATIVE_PATH,
         INSTALL_SCRIPT_RELATIVE_PATH, INSTALL_UNIT_RELATIVE_PATH, InstallOptions, ServiceManager,
-        UninstallOptions, default_config_template, install_with_sources, join_root, uninstall,
+        UninstallOptions, default_config_template, install_with_sources, join_root,
+        resolve_xdp_object, uninstall,
     };
+    use crate::xdp::bundled_object_path;
 
     #[test]
     fn default_config_template_includes_disabled_gp_block() {
@@ -475,6 +485,33 @@ mod tests {
         assert!(std::fs::read_to_string(join_root(&root, INSTALL_UNIT_RELATIVE_PATH))
             .unwrap()
             .contains("ExecStart=/usr/local/bin/walle run --xdp-object /usr/local/lib/walle/walle-ebpf"));
+    }
+
+    #[test]
+    fn bundled_object_path_resolves_from_bin_layout() {
+        let current_executable = PathBuf::from("/tmp/walle-release/bin/walle");
+        let bundled = bundled_object_path(&current_executable).unwrap();
+        assert_eq!(
+            bundled,
+            PathBuf::from("/tmp/walle-release/lib/walle/walle-ebpf")
+        );
+    }
+
+    #[test]
+    fn resolve_xdp_object_uses_bundle_layout_relative_to_bin() {
+        let root = temp_root("install-bundle-lookup");
+        let bin_dir = root.join("bin");
+        let lib_dir = root.join("lib/walle");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&lib_dir).unwrap();
+
+        let current_executable = bin_dir.join("walle");
+        let bundled_object = lib_dir.join("walle-ebpf");
+        std::fs::write(&current_executable, "bin").unwrap();
+        std::fs::write(&bundled_object, "obj").unwrap();
+
+        let resolved = resolve_xdp_object(None, &current_executable).unwrap();
+        assert_eq!(resolved, bundled_object);
     }
 
     #[test]
