@@ -1,0 +1,4 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "verify no forbidden runtime patterns and tests updated"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "verify error surface remains actionable"}

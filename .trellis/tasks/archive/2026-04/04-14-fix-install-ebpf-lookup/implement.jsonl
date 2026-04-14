@@ -1,0 +1,4 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "typed installer errors and actionable install failures"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "runtime-safe backend change with regression test coverage"}
