@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use walle_common::{AccessMode, IcmpMode};
 use walle_daemon::install::{InstallOptions, UninstallOptions, uninstall};
 use walle_daemon::logging::{format_unix_timestamp_secs, init_tracing};
-use walle_daemon::{DaemonOptions, WalleDaemon};
+use walle_daemon::{DaemonOptions, DaemonRunOutcome, WalleDaemon};
 use walle_policy::{IcmpAllowRule, LogLevel, WalleConfig};
 
 #[derive(Debug, Parser)]
@@ -285,8 +285,19 @@ fn run_command(args: RunArgs) -> Result<()> {
         },
     )?;
 
-    daemon.run()?;
-    println!("walle run exited after completing the requested SSH follow loop");
+    match daemon.run()? {
+        DaemonRunOutcome::ForegroundLoopCompleted => {
+            println!("walle run exited after completing the requested SSH follow loop");
+        }
+        DaemonRunOutcome::ShutdownRequested => {
+            println!("walle run exited after graceful shutdown");
+        }
+        DaemonRunOutcome::StartupOnly => {
+            println!(
+                "walle run initialized and returned without entering the foreground follow loop"
+            );
+        }
+    }
     Ok(())
 }
 

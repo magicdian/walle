@@ -68,6 +68,12 @@ For each boundary:
 
 **Good**: Each layer only knows its neighbors
 
+### Mistake 4: Assuming Signal Exit Behaves Like Normal Return
+
+**Bad**: Relying on process exit after `Ctrl+C` and assuming kernel hooks, background listeners, or pinned runtime state will clean themselves up.
+
+**Good**: Treat signal handling as part of the cross-layer contract when user-space manages kernel or network resources. Define how shutdown requests propagate from OS signal -> control loop -> resource teardown.
+
 ---
 
 ## Checklist for Cross-Layer Features
@@ -84,6 +90,7 @@ After implementation:
 - [ ] Verified error handling at each boundary
 - [ ] Checked data survives round-trip
 - [ ] For mixed enforcement states like deny + contain, verified precedence with tests in the earliest hook that can short-circuit traffic
+- [ ] If user-space owns kernel hooks, listeners, or pinned runtime state, verified `SIGINT` / `SIGTERM` takes the same cleanup path as an ordinary graceful return
 
 ---
 

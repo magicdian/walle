@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use walle_common::{
     DEFAULT_MAP_PIN_PATH, MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG,
     MAP_NAME_CONTAIN_V4, MAP_NAME_CONTAIN_V6, MAP_NAME_DENY_V4, MAP_NAME_DENY_V6,
@@ -23,7 +23,7 @@ pub struct XdpAttachment {
     object_path: PathBuf,
     map_pin_path: PathBuf,
     #[cfg(target_os = "linux")]
-    _ebpf: Ebpf,
+    ebpf: Option<Ebpf>,
 }
 
 impl XdpAttachment {
@@ -40,6 +40,41 @@ impl XdpAttachment {
     #[must_use]
     pub fn map_pin_path(&self) -> &Path {
         &self.map_pin_path
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup(&mut self) -> Result<(), XdpError> {
+        if self.ebpf.take().is_none() {
+            return Ok(());
+        }
+
+        reset_tc_programs(self.interface.as_str())?;
+        reset_pinned_maps(self.map_pin_path.as_path())?;
+
+        info!(
+            component = "xdp",
+            event = "detached",
+            interface = self.interface.as_str(),
+            map_pin_path = %self.map_pin_path.display(),
+            "released managed XDP/tc programs and map pins"
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for XdpAttachment {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            warn!(
+                component = "xdp",
+                event = "detach_failed",
+                interface = self.interface.as_str(),
+                error = %error,
+                "failed to fully clean up managed XDP/tc state"
+            );
+        }
     }
 }
 
@@ -191,7 +226,7 @@ fn attach_linux(
         interface: interface.to_string(),
         object_path,
         map_pin_path,
-        _ebpf: ebpf,
+        ebpf: Some(ebpf),
     })
 }
 
@@ -408,9 +443,21 @@ pub enum XdpError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use std::fs;
     use std::path::Path;
+    #[cfg(target_os = "linux")]
+    use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(target_os = "linux")]
+    use super::reset_pinned_maps;
     use super::{default_object_path, map_pin_path_for_interface, maybe_attach};
+    #[cfg(target_os = "linux")]
+    use walle_common::{
+        MAP_NAME_ALLOW_V4, MAP_NAME_ALLOW_V6, MAP_NAME_CONFIG, MAP_NAME_CONTAIN_V4,
+        MAP_NAME_CONTAIN_V6, MAP_NAME_DENY_V4, MAP_NAME_DENY_V6, MAP_NAME_ICMP_RULES,
+        MAP_NAME_STATS,
+    };
 
     #[test]
     fn default_object_path_points_to_workspace_target() {
@@ -427,5 +474,51 @@ mod tests {
     #[test]
     fn maybe_attach_skips_when_interface_is_missing() {
         assert!(matches!(maybe_attach(None, None, None), Ok(None)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reset_pinned_maps_removes_known_map_files() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let pin_dir = std::env::temp_dir().join(format!("walle-xdp-pins-{nanos}"));
+        fs::create_dir_all(&pin_dir).expect("temporary map pin directory should be created");
+
+        for map_name in [
+            MAP_NAME_CONFIG,
+            MAP_NAME_ALLOW_V4,
+            MAP_NAME_ALLOW_V6,
+            MAP_NAME_DENY_V4,
+            MAP_NAME_DENY_V6,
+            MAP_NAME_CONTAIN_V4,
+            MAP_NAME_CONTAIN_V6,
+            MAP_NAME_ICMP_RULES,
+            MAP_NAME_STATS,
+        ] {
+            fs::write(pin_dir.join(map_name), b"pin").expect("test pin file should be created");
+        }
+
+        reset_pinned_maps(pin_dir.as_path()).expect("known map pins should be removed");
+
+        for map_name in [
+            MAP_NAME_CONFIG,
+            MAP_NAME_ALLOW_V4,
+            MAP_NAME_ALLOW_V6,
+            MAP_NAME_DENY_V4,
+            MAP_NAME_DENY_V6,
+            MAP_NAME_CONTAIN_V4,
+            MAP_NAME_CONTAIN_V6,
+            MAP_NAME_ICMP_RULES,
+            MAP_NAME_STATS,
+        ] {
+            assert!(
+                !pin_dir.join(map_name).exists(),
+                "expected map pin {map_name} to be removed"
+            );
+        }
+
+        let _ = fs::remove_dir(&pin_dir);
     }
 }

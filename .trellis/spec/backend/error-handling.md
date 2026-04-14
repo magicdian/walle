@@ -69,6 +69,64 @@ If a machine-readable API is introduced later, it should preserve stable error c
 * Returning stringly-typed errors from lower layers.
 * Hiding whether a failure happened in detector logic, control-plane sync, or XDP attachment.
 * Logging an error without enough structured context to reproduce the issue.
+* Letting the OS default `SIGINT` / `SIGTERM` path terminate the process before runtime cleanup has a chance to run.
+
+## Scenario: Foreground Shutdown And Runtime Cleanup
+
+### 1. Scope / Trigger
+
+* Trigger: Any change to `walle run`, daemon foreground loops, signal handling, XDP/tc ownership, pinned map cleanup, or sshjail lifecycle.
+
+### 2. Signatures
+
+* `walle_cli::run_command(RunArgs) -> Result<()>`
+* `walle_daemon::WalleDaemon::run() -> Result<DaemonRunOutcome, DaemonError>`
+* `walle_daemon::WalleDaemon::run_ssh_follow_loop(...)`
+* `walle_daemon::xdp::XdpAttachment`
+* `walle_daemon::sshjail::SshJailService`
+
+### 3. Contracts
+
+* Foreground `walle run` must intercept operator shutdown signals such as `SIGINT` and `SIGTERM`.
+* Shutdown requests must translate into a normal Rust return path instead of abrupt process death.
+* Graceful shutdown must release managed runtime resources before success is reported:
+  * XDP links
+  * tc classifiers
+  * managed map pins
+  * sshjail listener threads
+* If signal-handler installation fails, the daemon must return a typed setup error instead of silently running without cleanup guarantees.
+
+### 4. Validation & Error Matrix
+
+* `Ctrl+C` during foreground follow loop -> loop exits cleanly and returns `DaemonRunOutcome::ShutdownRequested`
+* bounded foreground follow loop reaches iteration limit -> returns `DaemonRunOutcome::ForegroundLoopCompleted`
+* signal handler registration failure -> `DaemonError::InstallSignalHandler`
+* graceful teardown path removes managed map pins -> no stale pin files remain for the owned interface
+
+### 5. Good/Base/Bad Cases
+
+* Good:
+  * operator presses `Ctrl+C`, daemon logs a shutdown request, releases runtime resources, and exits without leaving tc redirect state behind
+* Base:
+  * startup-only code paths that do not enter the foreground loop may return `StartupOnly`
+* Bad:
+  * `Ctrl+C` kills the process through the default signal action before `Drop` or explicit cleanup runs
+  * CLI prints a normal loop-complete message after a signal-triggered stop
+
+### 6. Tests Required
+
+* daemon tests must cover in-process shutdown propagation through the foreground loop
+* runtime cleanup tests must cover managed pin-file removal without requiring live eBPF attach
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+* Treat `Ctrl+C` as “just another exit” and assume kernel-managed resources disappear automatically.
+
+#### Correct
+
+* Convert shutdown signals into an explicit control-path outcome, then release managed runtime resources before returning success to the CLI.
 
 ## Scenario: SSH Ingestion Errors
 

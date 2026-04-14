@@ -26,6 +26,11 @@ pub enum DaemonError {
     InterfaceNotConfigured { interface: String },
     #[error("environment compatibility checks failed: {details}")]
     EnvironmentIncompatible { details: String },
+    #[error("failed to install shutdown signal handler for {signal}: {source}")]
+    InstallSignalHandler {
+        signal: &'static str,
+        source: io::Error,
+    },
     #[error(
         "no active runtime backends were found for {action}; start `walle run` or install the service first"
     )]

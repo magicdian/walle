@@ -42,6 +42,7 @@ In eBPF code specifically:
 * Version-aware config and map updates.
 * Clear separation between detector logic and XDP enforcement logic.
 * Structured logging for significant control-plane events.
+* A graceful shutdown path for any runtime that owns XDP, tc, pinned maps, sockets, or worker threads.
 * Small, reviewable crates with obvious ownership boundaries.
 
 Before adding a new helper or utility, search for an existing abstraction first.
@@ -62,6 +63,7 @@ For future bug fixes:
 
 * add a regression test when the bug can reasonably be isolated
 * document non-testable kernel or environment constraints if a full automated test is not possible
+* if the bug involves process shutdown, add coverage for the in-process stop signal or control-path propagation even when the real OS signal cannot be asserted in unit tests
 
 ---
 
@@ -74,6 +76,7 @@ For future bug fixes:
 * Are user-visible errors actionable?
 * Are new dependencies justified for a systems-security tool?
 * Does the implementation match [`docs/architecture/walle-system-design.md`](E:/coding/github_projects/walle/docs/architecture/walle-system-design.md)?
+* If the code owns runtime hooks or listeners, does `Ctrl+C` / service stop release them through a tested graceful path?
 
 Current scaffold examples:
 

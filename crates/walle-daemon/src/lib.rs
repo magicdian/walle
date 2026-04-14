@@ -2,6 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod detector;
@@ -36,6 +37,7 @@ use crate::xdp::{XdpAttachment, attach, map_pin_path_for_interface};
 
 const DEFAULT_SSH_POLL_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_RUNTIME_LOCK_PATH: &str = "/tmp/walle.lock";
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug)]
 pub struct DaemonOptions {
@@ -58,6 +60,13 @@ impl Default for DaemonOptions {
             ssh_follow_iterations: None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DaemonRunOutcome {
+    StartupOnly,
+    ForegroundLoopCompleted,
+    ShutdownRequested,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,15 +171,29 @@ impl WalleDaemon {
         })
     }
 
-    pub fn run(&mut self) -> Result<(), DaemonError> {
+    pub fn run(&mut self) -> Result<DaemonRunOutcome, DaemonError> {
+        let shutdown = ShutdownSignalHandler::install()?;
         let _instance_lock = RuntimeInstanceLock::acquire_default()?;
         self.startup()?;
 
-        if self.should_run_follow_loop() {
-            self.run_ssh_follow_loop()?;
+        if shutdown.is_requested() {
+            self.log_shutdown_requested("startup", None);
+            self.shutdown("signal");
+            return Ok(DaemonRunOutcome::ShutdownRequested);
         }
 
-        Ok(())
+        if self.should_run_follow_loop() {
+            let outcome = self.run_ssh_follow_loop_until(|| shutdown.is_requested())?;
+            let reason = match outcome {
+                DaemonRunOutcome::ForegroundLoopCompleted => "follow_loop_complete",
+                DaemonRunOutcome::ShutdownRequested => "signal",
+                DaemonRunOutcome::StartupOnly => "startup_only",
+            };
+            self.shutdown(reason);
+            return Ok(outcome);
+        }
+
+        Ok(DaemonRunOutcome::StartupOnly)
     }
 
     pub fn startup(&mut self) -> Result<(), DaemonError> {
@@ -277,7 +300,17 @@ impl WalleDaemon {
         Ok(connected)
     }
 
-    pub fn run_ssh_follow_loop(&mut self) -> Result<(), DaemonError> {
+    pub fn run_ssh_follow_loop(&mut self) -> Result<DaemonRunOutcome, DaemonError> {
+        self.run_ssh_follow_loop_until(|| false)
+    }
+
+    fn run_ssh_follow_loop_until<F>(
+        &mut self,
+        mut is_shutdown_requested: F,
+    ) -> Result<DaemonRunOutcome, DaemonError>
+    where
+        F: FnMut() -> bool,
+    {
         let max_iterations = self.options.ssh_follow_iterations;
         let poll_interval = Duration::from_millis(self.options.ssh_poll_interval_ms);
         let live_mode = self.ssh_live_ingestor.mode();
@@ -296,6 +329,11 @@ impl WalleDaemon {
         let mut iteration = 0_u64;
 
         loop {
+            if is_shutdown_requested() {
+                self.log_shutdown_requested("follow_loop", Some(iteration));
+                return Ok(DaemonRunOutcome::ShutdownRequested);
+            }
+
             if matches!(max_iterations, Some(limit) if iteration >= limit) {
                 info!(
                     component = "daemon",
@@ -303,7 +341,7 @@ impl WalleDaemon {
                     iterations = iteration,
                     "completed bounded SSH follow loop"
                 );
-                return Ok(());
+                return Ok(DaemonRunOutcome::ForegroundLoopCompleted);
             }
 
             iteration = iteration.saturating_add(1);
@@ -355,6 +393,11 @@ impl WalleDaemon {
                 }
             }
 
+            if is_shutdown_requested() {
+                self.log_shutdown_requested("follow_loop", Some(iteration));
+                return Ok(DaemonRunOutcome::ShutdownRequested);
+            }
+
             if matches!(max_iterations, Some(limit) if iteration >= limit) {
                 info!(
                     component = "daemon",
@@ -362,7 +405,7 @@ impl WalleDaemon {
                     iterations = iteration,
                     "completed bounded SSH follow loop"
                 );
-                return Ok(());
+                return Ok(DaemonRunOutcome::ForegroundLoopCompleted);
             }
         }
     }
@@ -782,6 +825,41 @@ impl WalleDaemon {
             GpStrategyKind::Contain
         )
     }
+
+    fn log_shutdown_requested(&self, phase: &'static str, iteration: Option<u64>) {
+        info!(
+            component = "daemon",
+            event = "shutdown_requested",
+            reason = "signal",
+            phase,
+            iteration = iteration.unwrap_or(0),
+            iteration_known = iteration.is_some(),
+            "received shutdown request; stopping daemon gracefully"
+        );
+    }
+
+    fn shutdown(&mut self, reason: &'static str) {
+        let detached_interfaces = self
+            .runtimes
+            .iter()
+            .filter(|runtime| runtime.xdp.is_some())
+            .count();
+        let sshjail_was_running = self.ssh_jail.is_some();
+
+        for runtime in &mut self.runtimes {
+            let _ = runtime.xdp.take();
+        }
+        let _ = self.ssh_jail.take();
+
+        info!(
+            component = "daemon",
+            event = "shutdown_complete",
+            reason,
+            detached_interfaces,
+            sshjail_was_running,
+            "daemon resources were released"
+        );
+    }
 }
 
 fn select_interfaces(
@@ -823,6 +901,110 @@ fn add_stats(total: &mut StatsCounters, value: StatsCounters) {
     total.denylist_hits = total.denylist_hits.saturating_add(value.denylist_hits);
     total.icmp_rule_hits = total.icmp_rule_hits.saturating_add(value.icmp_rule_hits);
     total.parser_failures = total.parser_failures.saturating_add(value.parser_failures);
+}
+
+struct ShutdownSignalHandler {
+    #[cfg(target_os = "linux")]
+    previous_sigint: libc::sigaction,
+    #[cfg(target_os = "linux")]
+    previous_sigterm: libc::sigaction,
+}
+
+impl ShutdownSignalHandler {
+    fn install() -> Result<Self, DaemonError> {
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+
+        #[cfg(target_os = "linux")]
+        {
+            let previous_sigint = install_shutdown_signal(libc::SIGINT)?;
+            let previous_sigterm = match install_shutdown_signal(libc::SIGTERM) {
+                Ok(action) => action,
+                Err(error) => {
+                    let _ = restore_shutdown_signal(libc::SIGINT, &previous_sigint);
+                    return Err(error);
+                }
+            };
+
+            return Ok(Self {
+                previous_sigint,
+                previous_sigterm,
+            });
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    fn is_requested(&self) -> bool {
+        SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for ShutdownSignalHandler {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = restore_shutdown_signal(libc::SIGINT, &self.previous_sigint);
+            let _ = restore_shutdown_signal(libc::SIGTERM, &self.previous_sigterm);
+        }
+
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(target_os = "linux")]
+extern "C" fn mark_shutdown_requested(_signal: libc::c_int) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "linux")]
+fn install_shutdown_signal(signal: libc::c_int) -> Result<libc::sigaction, DaemonError> {
+    let mut new_action: libc::sigaction = unsafe { std::mem::zeroed() };
+    new_action.sa_sigaction = mark_shutdown_requested as *const () as usize;
+    new_action.sa_flags = libc::SA_RESTART;
+
+    if unsafe { libc::sigemptyset(&mut new_action.sa_mask) } != 0 {
+        return Err(DaemonError::InstallSignalHandler {
+            signal: shutdown_signal_name(signal),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+
+    let mut previous_action: libc::sigaction = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaction(signal, &new_action, &mut previous_action) } != 0 {
+        return Err(DaemonError::InstallSignalHandler {
+            signal: shutdown_signal_name(signal),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+
+    Ok(previous_action)
+}
+
+#[cfg(target_os = "linux")]
+fn restore_shutdown_signal(
+    signal: libc::c_int,
+    action: &libc::sigaction,
+) -> Result<(), DaemonError> {
+    if unsafe { libc::sigaction(signal, action, std::ptr::null_mut()) } != 0 {
+        return Err(DaemonError::InstallSignalHandler {
+            signal: shutdown_signal_name(signal),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+const fn shutdown_signal_name(signal: libc::c_int) -> &'static str {
+    match signal {
+        libc::SIGINT => "SIGINT",
+        libc::SIGTERM => "SIGTERM",
+        _ => "unknown",
+    }
 }
 
 impl RuntimeInstanceLock {
@@ -948,8 +1130,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        DEFAULT_SSH_POLL_INTERVAL_MS, DaemonOptions, RuntimeInstanceLock, WalleDaemon,
-        select_interfaces,
+        DEFAULT_SSH_POLL_INTERVAL_MS, DaemonOptions, DaemonRunOutcome, RuntimeInstanceLock,
+        WalleDaemon, select_interfaces,
     };
     use crate::detector::{SshBanDecision, SshFailureEvent, SshFailureReason};
     use crate::gp::GpExecutionStatus;
@@ -1004,6 +1186,24 @@ mod tests {
         .expect("bounded foreground daemon should be constructible");
 
         assert!(daemon.should_run_follow_loop());
+    }
+
+    #[test]
+    fn follow_loop_exits_cleanly_when_shutdown_is_requested_before_polling() {
+        let mut daemon = WalleDaemon::new(
+            WalleConfig::default(),
+            DaemonOptions {
+                foreground: true,
+                ..DaemonOptions::default()
+            },
+        )
+        .expect("foreground daemon should be constructible");
+
+        let outcome = daemon
+            .run_ssh_follow_loop_until(|| true)
+            .expect("shutdown request should stop the follow loop cleanly");
+
+        assert_eq!(outcome, DaemonRunOutcome::ShutdownRequested);
     }
 
     #[test]

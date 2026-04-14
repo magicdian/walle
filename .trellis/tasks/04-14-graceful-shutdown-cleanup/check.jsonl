@@ -1,0 +1,6 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Review shutdown and signal paths for typed errors and graceful teardown."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review regression coverage for runtime cleanup-sensitive paths."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Review lifecycle logging around shutdown request and completion."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Review signal-to-cleanup flow across daemon, sshjail, and XDP/tc layers."}
