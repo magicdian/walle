@@ -147,6 +147,11 @@ If a machine-readable API is introduced later, it should preserve stable error c
 * seek failures must keep the source path in the error
 * journald unsupported on non-Linux hosts must return a typed unsupported error
 * daemon boundaries should expose ingestion failures as `DaemonError::SshIngest`
+* live ingestion source selection must stay operator-configurable via `[detectors.ssh]`:
+  * `log_source_mode = "journald"` forces journald-based ingestion
+  * `log_source_mode = "log_files"` forces file-based ingestion (for example `/var/log/auth.log`)
+  * `log_source_mode = "auto"` may prefer journald when available, but is not a guaranteed lowest-latency path on every host
+* journald follow startup must avoid historical replay windows by resuming from a startup cursor (`--after-cursor`) when available
 
 ### 4. Validation & Error Matrix
 
@@ -155,16 +160,20 @@ If a machine-readable API is introduced later, it should preserve stable error c
 * non-Linux journald path -> `SshIngestError::UnsupportedJournald`
 * `journalctl` spawn failure -> `SshIngestError::Journalctl`
 * `journalctl` non-zero exit -> `SshIngestError::JournalctlFailed`
+* journald follow startup with discovered cursor -> follow command uses `--after-cursor <cursor>` and consumes only post-cursor entries
+* hosts where journald follow shows delayed first-event visibility -> switching to `log_source_mode = "log_files"` keeps detection bound to file append latency instead of journal catch-up behavior
 
 ### 5. Good/Base/Bad Cases
 
 * Good:
   * daemon caller receives a typed ingestion error with source context
   * replaying a valid SSH log file yields a summary instead of partial side effects only
+  * operators can force `log_files` mode when journald follow is slower on a specific environment
 * Base:
   * polling with no new lines returns an empty summary
 * Bad:
   * swallowing journald failure and pretending no events exist
+  * hard-coding journald as the only acceptable live source even when `auth.log` is measurably faster
   * returning plain strings with no source path information
 
 ### 6. Tests Required
@@ -172,6 +181,10 @@ If a machine-readable API is introduced later, it should preserve stable error c
 * file cursor tests must cover incremental reads
 * replay tests must cover full-file reads
 * non-Linux code paths must compile cleanly even if journald runtime is unavailable
+* journald follow argument tests must assert:
+  * cursor path uses `--after-cursor`
+  * no-cursor fallback keeps `--lines 0 --since now`
+* source-selection tests must keep `log_files` mode behavior stable when operators pin the source explicitly
 
 ### 7. Wrong vs Correct
 
@@ -219,7 +232,9 @@ Current scaffold examples:
   * `walle-ebpf` next to the current executable
   * `../lib/walle/walle-ebpf` relative to the current executable when binary path is `.../bin/walle`
   * workspace fallback `target/bpfel-unknown-none/release/walle-ebpf`
-* Runtime XDP attach must prefer `driver` mode first and fallback to `skb/generic` only when driver mode returns `EOPNOTSUPP`/`ENOTSUP`.
+* Runtime XDP attach must prefer `driver` mode first and fallback to `skb/generic` when driver mode returns a mode-not-supported errno:
+  * `EOPNOTSUPP` / `ENOTSUP`
+  * `EINVAL` from `bpf_link_create` on kernels/drivers that report unsupported native attach as invalid argument
 * If both driver and fallback attach fail, error text must preserve both failure causes (`driver_error`, `generic_error`) for operator diagnosis.
 * `WalleDaemon::startup()` must fail fast with `DaemonError::EnvironmentIncompatible` when compatibility checks contain any hard failures.
 * Ban commands that require active pinned maps must fail with `DaemonError::NoActiveRuntime` instead of pretending the action succeeded.
@@ -236,7 +251,7 @@ Current scaffold examples:
 * implicit install object lookup miss (adjacent + bundled + workspace all missing) -> `InstallError::MissingXdpObject` with full `searched` list
 * startup with missing bpffs / missing BTF / unsupported kernel / missing privileges -> `DaemonError::EnvironmentIncompatible`
 * runtime implicit object lookup miss -> `XdpError::MissingObject` with full `searched` list
-* runtime driver attach returns `EOPNOTSUPP` / `ENOTSUP` -> emit fallback warning and retry in `skb/generic`
+* runtime driver attach returns `EOPNOTSUPP` / `ENOTSUP` / driver-mode `EINVAL` variant -> emit fallback warning and retry in `skb/generic`
 * runtime driver attach fails with non-mode-support error -> fail with `XdpError::ProgramAttach` (`mode = "driver"`)
 * runtime driver attach mode-not-supported and fallback attach also fails -> `XdpError::ProgramAttachFallback`
 * `walle ban list` with no active runtime backend -> `DaemonError::NoActiveRuntime`
@@ -257,7 +272,7 @@ Current scaffold examples:
 * Bad:
   * allowing install to partially copy files before returning a vague permission error.
   * letting startup continue after a known compatibility failure and only surfacing the problem later in the attach path.
-  * failing immediately on driver-mode `ENOTSUP` without attempting a generic fallback on interfaces that support only `skb/generic`.
+  * failing immediately on driver-mode not-supported errors (`ENOTSUP`, `EOPNOTSUPP`, or driver-mode `EINVAL`) without attempting a generic fallback on interfaces that support only `skb/generic`.
   * publishing a release artifact that contains the userspace binary but omits the eBPF object.
 
 ### 6. Tests Required
@@ -267,7 +282,7 @@ Current scaffold examples:
 * daemon tests or review must confirm startup returns a typed compatibility error before XDP attach on failed environment checks.
 * XDP tests or review must confirm:
   * driver attach path is attempted first
-  * `ENOTSUP` / `EOPNOTSUPP` triggers fallback to `skb/generic`
+  * `ENOTSUP` / `EOPNOTSUPP` / driver-mode `EINVAL` trigger fallback to `skb/generic`
   * fallback success logs selected `xdp_mode`
   * dual-failure surfaces `ProgramAttachFallback`
 * manual validation must cover `cargo run -p xtask -- build-release` and confirm the produced archive includes both `bin/walle` and `lib/walle/walle-ebpf`.

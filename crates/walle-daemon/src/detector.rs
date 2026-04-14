@@ -727,19 +727,9 @@ struct JournalctlFollowSource {
 #[cfg(target_os = "linux")]
 impl JournalctlFollowSource {
     fn new() -> Result<Self, SshIngestError> {
+        let cursor = initialize_journal_cursor()?;
         let mut child = Command::new("journalctl")
-            .args([
-                "--no-pager",
-                "--lines",
-                "0",
-                "--follow",
-                "-o",
-                "cat",
-                "-u",
-                "ssh",
-                "-u",
-                "sshd",
-            ])
+            .args(journalctl_follow_args(cursor.as_deref()))
             .stdout(Stdio::piped())
             .spawn()
             .map_err(SshIngestError::Journalctl)?;
@@ -790,6 +780,32 @@ impl JournalctlFollowSource {
 
         Ok(lines)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn journalctl_follow_args(after_cursor: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "--no-pager".to_string(),
+        "--follow".to_string(),
+        "-o".to_string(),
+        "cat".to_string(),
+        "-u".to_string(),
+        "ssh".to_string(),
+        "-u".to_string(),
+        "sshd".to_string(),
+    ];
+
+    if let Some(cursor) = after_cursor {
+        args.push("--after-cursor".to_string());
+        args.push(cursor.to_string());
+    } else {
+        args.push("--lines".to_string());
+        args.push("0".to_string());
+        args.push("--since".to_string());
+        args.push("now".to_string());
+    }
+
+    args
 }
 
 #[cfg(target_os = "linux")]
@@ -1258,6 +1274,8 @@ mod tests {
         SshLiveSourceMode, SshLogIngestor, SshResolvedLogSource, live_source_candidates,
         parse_failure_event, resolve_sources_with, split_lines_with_carryover,
     };
+    #[cfg(target_os = "linux")]
+    use super::journalctl_follow_args;
 
     #[test]
     fn parses_failed_password_line_from_auth_log() {
@@ -1455,6 +1473,26 @@ mod tests {
         assert_eq!(lines.len(), 2);
 
         fs::remove_file(path).ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn journald_follow_args_with_cursor_resume_precisely() {
+        let args = journalctl_follow_args(Some("s=123;i=456"));
+        assert!(args.windows(2).any(|window| {
+            window[0] == "--after-cursor" && window[1] == "s=123;i=456"
+        }));
+        assert!(args.iter().any(|value| value == "--follow"));
+        assert!(!args.iter().any(|value| value == "--since"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn journald_follow_args_without_cursor_skip_historical_entries() {
+        let args = journalctl_follow_args(None);
+        assert!(args.windows(2).any(|window| window[0] == "--lines" && window[1] == "0"));
+        assert!(args.windows(2).any(|window| window[0] == "--since" && window[1] == "now"));
+        assert!(args.iter().any(|value| value == "--follow"));
     }
 
     fn unique_temp_path(file_name: &str) -> PathBuf {

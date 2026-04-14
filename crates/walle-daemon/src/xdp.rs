@@ -325,14 +325,24 @@ fn attach_xdp_program_with_fallback(
 fn is_xdp_mode_not_supported(error: &ProgramError) -> bool {
     match error {
         ProgramError::SyscallError(syscall) => {
-            let code = syscall.io_error.raw_os_error();
-            code == Some(libc::EOPNOTSUPP) || code == Some(libc::ENOTSUP)
+            is_xdp_mode_not_supported_errno(syscall.io_error.raw_os_error())
         }
         ProgramError::XdpError(AyaXdpAttachError::NetlinkError { io_error }) => {
-            let code = io_error.raw_os_error();
-            code == Some(libc::EOPNOTSUPP) || code == Some(libc::ENOTSUP)
+            is_xdp_mode_not_supported_errno(io_error.raw_os_error())
         }
         _ => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+const fn is_xdp_mode_not_supported_errno(code: Option<i32>) -> bool {
+    // Some kernels/drivers surface unsupported native/driver XDP attach from
+    // `bpf_link_create` as EINVAL instead of EOPNOTSUPP/ENOTSUP.
+    match code {
+        Some(errno) => {
+            errno == libc::EOPNOTSUPP || errno == libc::ENOTSUP || errno == libc::EINVAL
+        }
+        None => false,
     }
 }
 
@@ -580,7 +590,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[cfg(target_os = "linux")]
-    use super::reset_pinned_maps;
+    use super::{is_xdp_mode_not_supported_errno, reset_pinned_maps};
     use super::{
         bundled_object_path, default_object_path, map_pin_path_for_interface, maybe_attach,
         runtime_object_candidates,
@@ -683,5 +693,15 @@ mod tests {
         }
 
         let _ = fs::remove_dir(&pin_dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xdp_mode_not_supported_errno_includes_known_kernel_variants() {
+        assert!(is_xdp_mode_not_supported_errno(Some(libc::EOPNOTSUPP)));
+        assert!(is_xdp_mode_not_supported_errno(Some(libc::ENOTSUP)));
+        assert!(is_xdp_mode_not_supported_errno(Some(libc::EINVAL)));
+        assert!(!is_xdp_mode_not_supported_errno(Some(libc::EPERM)));
+        assert!(!is_xdp_mode_not_supported_errno(None));
     }
 }

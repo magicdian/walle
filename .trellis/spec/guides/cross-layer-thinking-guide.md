@@ -74,6 +74,12 @@ For each boundary:
 
 **Good**: Treat signal handling as part of the cross-layer contract when user-space manages kernel or network resources. Define how shutdown requests propagate from OS signal -> control loop -> resource teardown.
 
+### Mistake 5: Treating Kernel Error Codes As Stable Across Attach Paths
+
+**Bad**: Hard-coding one errno interpretation (for example only `ENOTSUP`) and assuming all kernels/drivers report unsupported capabilities the same way.
+
+**Good**: Define an explicit errno-classification contract at the user-space/kernel boundary (for example mode-not-supported set for XDP driver attach), and validate fallback behavior against each accepted errno variant.
+
 ---
 
 ## Checklist for Cross-Layer Features
@@ -84,6 +90,7 @@ Before implementation:
 - [ ] Defined format at each boundary
 - [ ] Decided where validation happens
 - [ ] If packet handling spans multiple hook points such as XDP and tc, verified the execution order and ensured earlier hooks do not block later redirect/translation steps
+- [ ] If boundary handling depends on OS/kernel errno values, defined an explicit classification matrix and fallback behavior for each accepted errno
 
 After implementation:
 - [ ] Tested with edge cases (null, empty, invalid)
