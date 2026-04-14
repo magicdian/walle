@@ -37,8 +37,7 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "04-14-ssh-overlay-pam-password-trap",
-    "04-14-ssh-overlay-install-release-integration"
+    "04-14-ssh-overlay-pam-password-trap"
   ],
   "parent": null,
   "relatedFiles": [
