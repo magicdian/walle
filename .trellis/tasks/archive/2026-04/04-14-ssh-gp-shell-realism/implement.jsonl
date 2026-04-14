@@ -1,0 +1,8 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Typed daemon errors and side-effect boundaries"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Structured logging expectations for sshjail behavior"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "SSH jail realism contract and testing expectations"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Avoid duplicate command/rendering helpers while expanding shell realism"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "Containment and sshjail architectural contract"}
+{"file": "crates/walle-daemon/src/sshjail.rs", "reason": "Existing sshjail patterns and tests to extend consistently"}

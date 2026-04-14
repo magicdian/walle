@@ -1,0 +1,8 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check-backend.md", "reason": "Backend check spec"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Typed daemon errors and side-effect boundaries"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Structured logging expectations for sshjail behavior"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "SSH jail realism contract and testing expectations"}
+{"file": "docs/architecture/walle-system-design.md", "reason": "Containment and sshjail architectural contract"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Avoid duplicate command/rendering helpers while expanding shell realism"}
+{"file": "crates/walle-daemon/src/sshjail.rs", "reason": "Verify realism changes against the existing shell implementation and tests"}
