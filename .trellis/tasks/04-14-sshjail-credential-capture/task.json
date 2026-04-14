@@ -36,9 +36,7 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [
-    "04-14-ssh-overlay-pam-password-trap"
-  ],
+  "children": [],
   "parent": null,
   "relatedFiles": [
     "crates/walle-daemon/src/sshjail.rs",
