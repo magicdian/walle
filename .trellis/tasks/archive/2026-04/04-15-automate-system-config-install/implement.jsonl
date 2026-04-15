@@ -1,0 +1,7 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Security-sensitive backend changes need explicit tests and reviewable ownership boundaries"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Keep hook install failures in typed installer errors and avoid partial writes"}
+{"file": ".trellis/spec/backend/ssh-overlay-and-bundle-contract.md", "reason": "Preserve exact sshd/nss/pam activation contract and ordering"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "CLI command changes and installer logic cross crate boundaries"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Centralize hook editing helpers instead of duplicating per-file logic"}
