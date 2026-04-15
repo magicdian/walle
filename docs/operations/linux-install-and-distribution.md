@@ -94,11 +94,26 @@ Install:
 7. Write SSH overlay samples and the trap-login shell wrapper.
 8. Write a `systemd` unit when `systemd` is available; otherwise write a fallback runner script.
 
-The install flow intentionally does not edit `sshd_config` or `/etc/nsswitch.conf` automatically. The operator manually merges:
+SSH overlay host-config activation now runs through dedicated overlay hook commands instead of top-level `walle install`:
 
-* `/usr/local/lib/walle/walle-ssh-overlay.conf.sample` into `sshd_config`
-* `/usr/local/lib/walle/walle-nsswitch.conf.sample` into `/etc/nsswitch.conf`
-* `/usr/local/lib/walle/walle-sshd-pam.conf.sample` into `/etc/pam.d/sshd`
+* `walle ssh overlay install-hooks`
+* `walle ssh overlay hook-status`
+* `walle ssh overlay hook-disable`
+* `walle ssh overlay hook-restore-backup`
+
+`install-hooks`:
+
+* previews only changed hunks in a patch-style format, with surrounding context
+* colorizes additions and deletions on ANSI-capable terminals
+* requires explicit confirmation before writing
+* creates backups under `/etc/walle/ssh-overlay-hooks/`
+* inserts Walle-managed markers around the SSH/PAM/NSS edits
+* fails closed if the host already has conflicting `AuthorizedKeysCommand` settings, required PAM anchors are missing, or `passwd:` / `group:` / `shadow:` are missing from `nsswitch.conf`
+* adds a managed `initgroups:` block when that entry is absent
+
+`hook-disable` removes Walle-managed hook content while preserving unrelated operator edits made after installation.
+
+`hook-restore-backup` restores the pre-hook backup files exactly.
 
 After installing the NSS module, run `ldconfig` before enabling the overlay so the loader cache sees `libnss_walle.so.2`.
 
@@ -121,6 +136,7 @@ Common install/runtime failures and expected guidance:
 | missing eBPF object | install source bundle is incomplete | build with `cargo run -p xtask -- build-ebpf` or pass `--xdp-object` |
 | missing NSS module | identity-overlay install source is incomplete | build with `cargo build -p walle-nss --release` or use a release bundle that includes `libnss_walle.so.2` |
 | missing PAM module | password/account/session trap install source is incomplete | build with `cargo build -p walle-pam --release` or use a release bundle that includes `pam_walle.so` |
+| existing `AuthorizedKeysCommand` or unexpected PAM/NSS layout | host config is outside Walle's strict managed-hook contract | remove the conflicting config manually or restore the host to the documented baseline before rerunning `walle ssh overlay install-hooks` |
 | missing root privileges | install or runtime attach is not allowed | rerun install / run as `root` |
 | missing bpffs mount | pinned map path is unavailable | mount bpffs at `/sys/fs/bpf` |
 | missing kernel BTF | current runtime path is unsupported on this host | install kernel BTF package or use a supported kernel |

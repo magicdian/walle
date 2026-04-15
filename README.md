@@ -98,13 +98,30 @@ sudo systemctl enable --now walle
 sudo systemctl status walle
 ```
 
-If you want the SSH identity overlay, manually merge:
+If you want the SSH identity overlay, install the managed hooks:
 
-* `/usr/local/lib/walle/walle-ssh-overlay.conf.sample` into `sshd_config`
-* `/usr/local/lib/walle/walle-nsswitch.conf.sample` into `/etc/nsswitch.conf`
-* `/usr/local/lib/walle/walle-sshd-pam.conf.sample` into `/etc/pam.d/sshd`
+```bash
+sudo /usr/local/bin/walle ssh overlay install-hooks
+sudo sshd -t
+sudo systemctl restart ssh || sudo service ssh restart
+```
 
-Then restart `sshd`.
+The hook installer:
+
+* shows only changed patch hunks before writing, with surrounding context
+* colorizes additions and deletions on ANSI-capable terminals
+* requires explicit confirmation
+* creates backups under `/etc/walle/ssh-overlay-hooks/`
+* fails closed if the host already has conflicting `AuthorizedKeysCommand` settings, required PAM anchors are missing, or `passwd:` / `group:` / `shadow:` are missing from `nsswitch.conf`
+* adds a managed `initgroups:` block when that entry is absent
+
+Related lifecycle commands:
+
+```bash
+sudo /usr/local/bin/walle ssh overlay hook-status
+sudo /usr/local/bin/walle ssh overlay hook-disable
+sudo /usr/local/bin/walle ssh overlay hook-restore-backup
+```
 
 When `systemd` is unavailable, run the fallback script directly:
 

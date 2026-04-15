@@ -212,9 +212,17 @@ Current scaffold examples:
 
 * `walle install [--root <path>] [--xdp-object <path>]`
 * `walle uninstall [--root <path>]`
+* `walle ssh overlay install-hooks [--root <path>]`
+* `walle ssh overlay hook-status [--root <path>]`
+* `walle ssh overlay hook-disable [--root <path>]`
+* `walle ssh overlay hook-restore-backup [--root <path>]`
 * `walle run [--interface <name>] [--xdp-object <path>]`
 * `install::install(InstallOptions) -> Result<InstallReport, InstallError>`
 * `install::uninstall(UninstallOptions) -> Result<UninstallReport, InstallError>`
+* `install::plan_ssh_overlay_hook_install(SshOverlayHookOptions) -> Result<SshOverlayHookPlan, InstallError>`
+* `install::apply_ssh_overlay_hook_plan(SshOverlayHookPlan) -> Result<SshOverlayHookApplyReport, InstallError>`
+* `install::disable_ssh_overlay_hooks(SshOverlayHookOptions) -> Result<SshOverlayHookApplyReport, InstallError>`
+* `install::restore_ssh_overlay_hook_backup(SshOverlayHookOptions) -> Result<SshOverlayHookApplyReport, InstallError>`
 * `install::resolve_xdp_object(Option<&Path>, &Path) -> Result<PathBuf, InstallError>`
 * `WalleDaemon::startup() -> Result<(), DaemonError>`
 * `xdp::attach(&str, Option<&Path>, Option<&Path>) -> Result<XdpAttachment, XdpError>`
@@ -226,7 +234,10 @@ Current scaffold examples:
 ### 3. Contracts
 
 * Install / uninstall failures must stay in the installer boundary as typed `InstallError` values until the CLI renders them.
+* SSH overlay hook planning, apply, disable, status, and backup-restore failures must stay in the same installer boundary as typed `InstallError` values until the CLI renders them.
 * Installing into `/` without root privileges must fail explicitly; do not attempt partial writes and do not silently downgrade the target path.
+* Hook installation into `/` must fail explicitly without root privileges, preview the exact changed hunks first, and abort without partial writes if target files drift between preview and confirmation.
+* Preview rendering errors and plan/apply drift checks must remain typed `InstallError` failures; ANSI color is a CLI-only rendering concern and must not leak into backend diff data.
 * Missing eBPF release objects during install must mention the searched paths and the operator remediation path.
 * Install and runtime default object lookup must search in this order when `--xdp-object` is absent:
   * `walle-ebpf` next to the current executable

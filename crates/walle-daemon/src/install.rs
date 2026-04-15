@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ssh_overlay::{
     render_nsswitch_config_fragment, render_pam_config_fragment, render_sshd_config_fragment,
@@ -24,10 +25,25 @@ const INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH: &str = "usr/local/lib/walle/walle-
 const INSTALL_SCRIPT_RELATIVE_PATH: &str = "usr/local/lib/walle/walle-run.sh";
 const INSTALL_UNIT_RELATIVE_PATH: &str = "etc/systemd/system/walle.service";
 const INSTALL_CONFIG_RELATIVE_PATH: &str = "etc/walle/config.toml";
+const SSH_OVERLAY_HOOK_BACKUP_DIR_RELATIVE_PATH: &str = "etc/walle/ssh-overlay-hooks";
+const SSHD_CONFIG_RELATIVE_PATH: &str = "etc/ssh/sshd_config";
+const NSSWITCH_CONFIG_RELATIVE_PATH: &str = "etc/nsswitch.conf";
+const SSHD_PAM_CONFIG_RELATIVE_PATH: &str = "etc/pam.d/sshd";
 const NSS_MODULE_FILENAME: &str = "libnss_walle.so.2";
 const NSS_MODULE_BUILD_ARTIFACT: &str = "libnss_walle.so";
 const PAM_MODULE_FILENAME: &str = "pam_walle.so";
 const PAM_MODULE_BUILD_ARTIFACT: &str = "libpam_walle.so";
+const MANAGED_START_PREFIX: &str = "# managed by walle start ";
+const MANAGED_END_PREFIX: &str = "# managed by walle end ";
+const PRESERVED_ORIGINAL_PREFIX: &str = "# original by walle: ";
+const SSHD_BLOCK_ID: &str = "sshd-authorized-keys";
+const PAM_AUTH_BLOCK_ID: &str = "pam-auth";
+const PAM_ACCOUNT_BLOCK_ID: &str = "pam-account";
+const PAM_SESSION_BLOCK_ID: &str = "pam-session";
+const NSS_PASSWD_BLOCK_ID: &str = "nsswitch-passwd";
+const NSS_GROUP_BLOCK_ID: &str = "nsswitch-group";
+const NSS_SHADOW_BLOCK_ID: &str = "nsswitch-shadow";
+const NSS_INITGROUPS_BLOCK_ID: &str = "nsswitch-initgroups";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstallOptions {
@@ -57,6 +73,63 @@ impl Default for UninstallOptions {
             root: PathBuf::from("/"),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshOverlayHookOptions {
+    pub root: PathBuf,
+}
+
+impl Default for SshOverlayHookOptions {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::from("/"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SshOverlayHookPlan {
+    pub preview: String,
+    pub changed_paths: Vec<PathBuf>,
+    pub backup_paths_to_create: Vec<PathBuf>,
+    updates: Vec<PlannedFileUpdate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshOverlayHookApplyReport {
+    pub changed_paths: Vec<PathBuf>,
+    pub backup_paths_created: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshOverlayHookStatusEntry {
+    pub path: PathBuf,
+    pub present_block_ids: Vec<String>,
+    pub expected_block_ids: Vec<String>,
+    pub backup_path: PathBuf,
+    pub backup_exists: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshOverlayHookStatusReport {
+    pub entries: Vec<SshOverlayHookStatusEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct PlannedFileUpdate {
+    path: PathBuf,
+    original_content: String,
+    updated_content: String,
+    backup_path: PathBuf,
+    ensure_backup: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HookTargetKind {
+    Sshd,
+    Nsswitch,
+    PamSshd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +232,164 @@ pub fn uninstall(options: UninstallOptions) -> Result<UninstallReport, InstallEr
     }
 }
 
+pub fn plan_ssh_overlay_hook_install(
+    options: SshOverlayHookOptions,
+) -> Result<SshOverlayHookPlan, InstallError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = options;
+        Err(InstallError::UnsupportedHost)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        ensure_install_privileges(&options.root)?;
+
+        let hook_files = load_hook_files(&options.root)?;
+        let mut updates = Vec::new();
+
+        for hook_file in hook_files {
+            let updated_content = render_install_hook_content(
+                hook_file.kind,
+                &hook_file.path,
+                hook_file.contents.as_str(),
+            )?;
+            if updated_content != hook_file.contents {
+                updates.push(PlannedFileUpdate {
+                    path: hook_file.path.clone(),
+                    original_content: hook_file.contents,
+                    updated_content,
+                    backup_path: hook_backup_path(&options.root, hook_file.kind),
+                    ensure_backup: !hook_backup_path(&options.root, hook_file.kind).exists(),
+                });
+            }
+        }
+
+        Ok(build_hook_plan(updates))
+    }
+}
+
+pub fn apply_ssh_overlay_hook_plan(
+    plan: SshOverlayHookPlan,
+) -> Result<SshOverlayHookApplyReport, InstallError> {
+    apply_planned_file_updates(plan.updates)
+}
+
+pub fn ssh_overlay_hook_status(
+    options: SshOverlayHookOptions,
+) -> Result<SshOverlayHookStatusReport, InstallError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = options;
+        Err(InstallError::UnsupportedHost)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        ensure_install_privileges(&options.root)?;
+        let hook_files = load_hook_files(&options.root)?;
+        let entries = hook_files
+            .into_iter()
+            .map(|hook_file| {
+                let present_block_ids = collect_managed_block_ids(
+                    hook_file.path.as_path(),
+                    hook_file.contents.as_str(),
+                )?;
+                Ok(SshOverlayHookStatusEntry {
+                    path: hook_file.path,
+                    present_block_ids,
+                    expected_block_ids: expected_block_ids(hook_file.kind)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    backup_path: hook_backup_path(&options.root, hook_file.kind),
+                    backup_exists: hook_backup_path(&options.root, hook_file.kind).exists(),
+                })
+            })
+            .collect::<Result<Vec<_>, InstallError>>()?;
+
+        Ok(SshOverlayHookStatusReport { entries })
+    }
+}
+
+pub fn disable_ssh_overlay_hooks(
+    options: SshOverlayHookOptions,
+) -> Result<SshOverlayHookApplyReport, InstallError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = options;
+        Err(InstallError::UnsupportedHost)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        ensure_install_privileges(&options.root)?;
+
+        let hook_files = load_hook_files(&options.root)?;
+        let mut updates = Vec::new();
+
+        for hook_file in hook_files {
+            let updated_content = render_disable_hook_content(
+                hook_file.kind,
+                &hook_file.path,
+                hook_file.contents.as_str(),
+            )?;
+            if updated_content != hook_file.contents {
+                updates.push(PlannedFileUpdate {
+                    path: hook_file.path,
+                    original_content: hook_file.contents,
+                    updated_content,
+                    backup_path: hook_backup_path(&options.root, hook_file.kind),
+                    ensure_backup: false,
+                });
+            }
+        }
+
+        apply_planned_file_updates(updates)
+    }
+}
+
+pub fn restore_ssh_overlay_hook_backup(
+    options: SshOverlayHookOptions,
+) -> Result<SshOverlayHookApplyReport, InstallError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = options;
+        Err(InstallError::UnsupportedHost)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        ensure_install_privileges(&options.root)?;
+
+        let hook_files = load_hook_files(&options.root)?;
+        let mut updates = Vec::new();
+
+        for hook_file in hook_files {
+            let backup_path = hook_backup_path(&options.root, hook_file.kind);
+            if !backup_path.exists() {
+                return Err(InstallError::MissingHookBackup {
+                    path: hook_file.path,
+                    backup_path,
+                });
+            }
+
+            let backup_content = read_file(&backup_path)?;
+            if backup_content != hook_file.contents {
+                updates.push(PlannedFileUpdate {
+                    path: hook_file.path,
+                    original_content: hook_file.contents,
+                    updated_content: backup_content,
+                    backup_path,
+                    ensure_backup: false,
+                });
+            }
+        }
+
+        apply_planned_file_updates(updates)
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn install_with_sources(
     options: InstallOptions,
@@ -244,6 +475,813 @@ fn install_with_sources(
         service_path,
         config_created,
     })
+}
+
+struct HookFile {
+    kind: HookTargetKind,
+    path: PathBuf,
+    contents: String,
+}
+
+fn load_hook_files(root: &Path) -> Result<Vec<HookFile>, InstallError> {
+    let mut files = Vec::new();
+    for kind in [
+        HookTargetKind::Sshd,
+        HookTargetKind::Nsswitch,
+        HookTargetKind::PamSshd,
+    ] {
+        let path = hook_target_path(root, kind);
+        files.push(HookFile {
+            kind,
+            contents: read_file(&path)?,
+            path,
+        });
+    }
+    Ok(files)
+}
+
+fn hook_target_path(root: &Path, kind: HookTargetKind) -> PathBuf {
+    join_root(
+        root,
+        match kind {
+            HookTargetKind::Sshd => SSHD_CONFIG_RELATIVE_PATH,
+            HookTargetKind::Nsswitch => NSSWITCH_CONFIG_RELATIVE_PATH,
+            HookTargetKind::PamSshd => SSHD_PAM_CONFIG_RELATIVE_PATH,
+        },
+    )
+}
+
+fn hook_backup_path(root: &Path, kind: HookTargetKind) -> PathBuf {
+    let backup_dir = join_root(root, SSH_OVERLAY_HOOK_BACKUP_DIR_RELATIVE_PATH);
+    join_root(
+        backup_dir.as_path(),
+        match kind {
+            HookTargetKind::Sshd => "sshd_config.pre-walle",
+            HookTargetKind::Nsswitch => "nsswitch.conf.pre-walle",
+            HookTargetKind::PamSshd => "pam_sshd.pre-walle",
+        },
+    )
+}
+
+fn expected_block_ids(kind: HookTargetKind) -> Vec<&'static str> {
+    match kind {
+        HookTargetKind::Sshd => vec![SSHD_BLOCK_ID],
+        HookTargetKind::Nsswitch => vec![
+            NSS_PASSWD_BLOCK_ID,
+            NSS_GROUP_BLOCK_ID,
+            NSS_SHADOW_BLOCK_ID,
+            NSS_INITGROUPS_BLOCK_ID,
+        ],
+        HookTargetKind::PamSshd => vec![
+            PAM_AUTH_BLOCK_ID,
+            PAM_ACCOUNT_BLOCK_ID,
+            PAM_SESSION_BLOCK_ID,
+        ],
+    }
+}
+
+fn render_install_hook_content(
+    kind: HookTargetKind,
+    path: &Path,
+    contents: &str,
+) -> Result<String, InstallError> {
+    match kind {
+        HookTargetKind::Sshd => render_install_sshd_hook(path, contents),
+        HookTargetKind::Nsswitch => render_install_nsswitch_hook(path, contents),
+        HookTargetKind::PamSshd => render_install_pam_hook(path, contents),
+    }
+}
+
+fn render_disable_hook_content(
+    kind: HookTargetKind,
+    path: &Path,
+    contents: &str,
+) -> Result<String, InstallError> {
+    match kind {
+        HookTargetKind::Sshd => remove_managed_blocks(path, contents, &[SSHD_BLOCK_ID]),
+        HookTargetKind::PamSshd => remove_managed_blocks(
+            path,
+            contents,
+            &[
+                PAM_AUTH_BLOCK_ID,
+                PAM_ACCOUNT_BLOCK_ID,
+                PAM_SESSION_BLOCK_ID,
+            ],
+        ),
+        HookTargetKind::Nsswitch => restore_nsswitch_original_lines(path, contents),
+    }
+}
+
+fn render_install_sshd_hook(path: &Path, contents: &str) -> Result<String, InstallError> {
+    let mut lines = to_lines(contents);
+    let block = managed_block(
+        SSHD_BLOCK_ID,
+        render_sshd_config_fragment(Path::new("/usr/local/bin/walle")).trim_end(),
+        None,
+    );
+    if replace_existing_block(path, &mut lines, SSHD_BLOCK_ID, &block)? {
+        ensure_no_sshd_overlay_conflicts(path, &lines)?;
+        return Ok(from_lines(&lines));
+    }
+
+    ensure_no_sshd_overlay_conflicts(path, &lines)?;
+    let insert_index = lines
+        .iter()
+        .position(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("Match ")
+        })
+        .unwrap_or(lines.len());
+    lines.splice(insert_index..insert_index, block);
+    Ok(from_lines(&lines))
+}
+
+fn render_install_nsswitch_hook(path: &Path, contents: &str) -> Result<String, InstallError> {
+    let mut lines = to_lines(contents);
+    let group_fallback_tokens = active_nsswitch_sources(path, &lines, "group")?;
+
+    for (block_id, key) in [
+        (NSS_PASSWD_BLOCK_ID, "passwd"),
+        (NSS_GROUP_BLOCK_ID, "group"),
+        (NSS_SHADOW_BLOCK_ID, "shadow"),
+        (NSS_INITGROUPS_BLOCK_ID, "initgroups"),
+    ] {
+        if let Some((start, end)) = find_managed_block_range(path, &lines, block_id)? {
+            let original = parse_optional_preserved_original_line(&lines[start..end]);
+            let desired_line = render_managed_nsswitch_line(
+                path,
+                key,
+                original.as_deref().unwrap_or_else(|| match key {
+                    "initgroups" => "initgroups: files",
+                    _ => "",
+                }),
+                Some(group_fallback_tokens.as_slice()),
+            )?;
+            lines.splice(
+                start..end,
+                managed_block(block_id, desired_line.as_str(), original.as_deref()),
+            );
+            continue;
+        }
+
+        if let Some(line_index) = find_optional_active_setting_index(&lines, key) {
+            let original_line = lines[line_index].clone();
+            let desired_line = render_managed_nsswitch_line(
+                path,
+                key,
+                original_line.as_str(),
+                Some(group_fallback_tokens.as_slice()),
+            )?;
+            lines.splice(
+                line_index..=line_index,
+                managed_block(
+                    block_id,
+                    desired_line.as_str(),
+                    Some(original_line.as_str()),
+                ),
+            );
+            continue;
+        }
+
+        if key != "initgroups" {
+            return Err(InstallError::HookConflict {
+                path: path.to_path_buf(),
+                message: format!("required active nsswitch entry '{key}:' was not found"),
+            });
+        }
+
+        let desired_line = render_managed_nsswitch_line(
+            path,
+            key,
+            "initgroups: files",
+            Some(group_fallback_tokens.as_slice()),
+        )?;
+        let insert_index = find_initgroups_insert_index(path, &lines)?;
+        lines.splice(
+            insert_index..insert_index,
+            managed_block(block_id, desired_line.as_str(), None),
+        );
+    }
+    Ok(from_lines(&lines))
+}
+
+fn render_install_pam_hook(path: &Path, contents: &str) -> Result<String, InstallError> {
+    let mut lines = to_lines(contents);
+    ensure_no_manual_pam_overlay_conflicts(path, &lines)?;
+
+    let auth_block = managed_block(
+        PAM_AUTH_BLOCK_ID,
+        format!(
+            "auth    [success=done default=ignore] {}",
+            Path::new("/usr/local/lib/walle/pam_walle.so").display()
+        )
+        .as_str(),
+        None,
+    );
+    if !replace_existing_block(path, &mut lines, PAM_AUTH_BLOCK_ID, &auth_block)? {
+        let index = find_exact_line_index(path, &lines, "@include common-auth")?;
+        lines.splice(index..index, auth_block);
+    }
+
+    let account_block = managed_block(
+        PAM_ACCOUNT_BLOCK_ID,
+        format!(
+            "account [success=done default=ignore] {}",
+            Path::new("/usr/local/lib/walle/pam_walle.so").display()
+        )
+        .as_str(),
+        None,
+    );
+    if !replace_existing_block(path, &mut lines, PAM_ACCOUNT_BLOCK_ID, &account_block)? {
+        let before_index = find_line_containing(path, &lines, "pam_nologin.so")?;
+        let after_index = find_exact_line_index(path, &lines, "@include common-account")?;
+        if before_index >= after_index {
+            return Err(InstallError::HookConflict {
+                path: path.to_path_buf(),
+                message: "expected pam_nologin.so before @include common-account".to_string(),
+            });
+        }
+        lines.splice(before_index + 1..before_index + 1, account_block);
+    }
+
+    let session_block = managed_block(
+        PAM_SESSION_BLOCK_ID,
+        format!(
+            "session [success=done default=ignore] {}",
+            Path::new("/usr/local/lib/walle/pam_walle.so").display()
+        )
+        .as_str(),
+        None,
+    );
+    if !replace_existing_block(path, &mut lines, PAM_SESSION_BLOCK_ID, &session_block)? {
+        let before_index = find_line_containing(path, &lines, "pam_keyinit.so")?;
+        let after_index = find_exact_line_index(path, &lines, "@include common-session")?;
+        if before_index >= after_index {
+            return Err(InstallError::HookConflict {
+                path: path.to_path_buf(),
+                message: "expected pam_keyinit.so before @include common-session".to_string(),
+            });
+        }
+        lines.splice(before_index + 1..before_index + 1, session_block);
+    }
+
+    Ok(from_lines(&lines))
+}
+
+fn build_hook_plan(updates: Vec<PlannedFileUpdate>) -> SshOverlayHookPlan {
+    let mut preview = String::new();
+    let mut changed_paths = Vec::new();
+    let mut backup_paths_to_create = Vec::new();
+
+    for update in &updates {
+        changed_paths.push(update.path.clone());
+        if update.ensure_backup {
+            backup_paths_to_create.push(update.backup_path.clone());
+        }
+        if !preview.is_empty() {
+            preview.push('\n');
+        }
+        preview.push_str(
+            render_unified_diff(
+                update.path.as_path(),
+                update.original_content.as_str(),
+                update.updated_content.as_str(),
+            )
+            .as_str(),
+        );
+    }
+
+    SshOverlayHookPlan {
+        preview,
+        changed_paths,
+        backup_paths_to_create,
+        updates,
+    }
+}
+
+fn apply_planned_file_updates(
+    updates: Vec<PlannedFileUpdate>,
+) -> Result<SshOverlayHookApplyReport, InstallError> {
+    let mut backup_paths_created = Vec::new();
+
+    for update in &updates {
+        let current = read_file(&update.path)?;
+        if current != update.original_content {
+            return Err(InstallError::HookChangedDuringConfirmation {
+                path: update.path.clone(),
+            });
+        }
+    }
+
+    for update in &updates {
+        if update.ensure_backup && !update.backup_path.exists() {
+            write_file(
+                update.backup_path.as_path(),
+                update.original_content.as_str(),
+            )?;
+            backup_paths_created.push(update.backup_path.clone());
+        }
+    }
+
+    let mut applied: Vec<PlannedFileUpdate> = Vec::new();
+    for update in &updates {
+        if let Err(error) =
+            atomic_write_file(update.path.as_path(), update.updated_content.as_str())
+        {
+            for previous in applied.into_iter().rev() {
+                let _ =
+                    atomic_write_file(previous.path.as_path(), previous.original_content.as_str());
+            }
+            return Err(error);
+        }
+        applied.push(update.clone());
+    }
+
+    Ok(SshOverlayHookApplyReport {
+        changed_paths: updates.into_iter().map(|update| update.path).collect(),
+        backup_paths_created,
+    })
+}
+
+fn ensure_no_sshd_overlay_conflicts(path: &Path, lines: &[String]) -> Result<(), InstallError> {
+    let mut in_managed_block = false;
+    for line in lines {
+        if line.starts_with(MANAGED_START_PREFIX) {
+            in_managed_block = true;
+            continue;
+        }
+        if line.starts_with(MANAGED_END_PREFIX) {
+            in_managed_block = false;
+            continue;
+        }
+        if in_managed_block {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with("AuthorizedKeysCommand ")
+            || trimmed == "AuthorizedKeysCommand"
+            || trimmed.starts_with("AuthorizedKeysCommandUser ")
+            || trimmed == "AuthorizedKeysCommandUser"
+        {
+            return Err(InstallError::HookConflict {
+                path: path.to_path_buf(),
+                message: "existing AuthorizedKeysCommand settings must be removed before Walle can install hooks".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn ensure_no_manual_pam_overlay_conflicts(
+    path: &Path,
+    lines: &[String],
+) -> Result<(), InstallError> {
+    let mut in_managed_block = false;
+    for line in lines {
+        if line.starts_with(MANAGED_START_PREFIX) {
+            in_managed_block = true;
+            continue;
+        }
+        if line.starts_with(MANAGED_END_PREFIX) {
+            in_managed_block = false;
+            continue;
+        }
+        if in_managed_block {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.contains("/usr/local/lib/walle/pam_walle.so") {
+            return Err(InstallError::HookConflict {
+                path: path.to_path_buf(),
+                message: "existing pam_walle.so directives must be removed before Walle can install managed PAM hooks".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn find_exact_line_index(
+    path: &Path,
+    lines: &[String],
+    needle: &str,
+) -> Result<usize, InstallError> {
+    lines
+        .iter()
+        .position(|line| line.trim() == needle)
+        .ok_or_else(|| InstallError::HookConflict {
+            path: path.to_path_buf(),
+            message: format!("required anchor '{needle}' was not found"),
+        })
+}
+
+fn find_line_containing(
+    path: &Path,
+    lines: &[String],
+    needle: &str,
+) -> Result<usize, InstallError> {
+    lines
+        .iter()
+        .position(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with('#') && trimmed.contains(needle)
+        })
+        .ok_or_else(|| InstallError::HookConflict {
+            path: path.to_path_buf(),
+            message: format!("required anchor containing '{needle}' was not found"),
+        })
+}
+
+fn find_optional_active_setting_index(lines: &[String], key: &str) -> Option<usize> {
+    let mut matches = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let trimmed = line.trim();
+            !trimmed.starts_with('#') && trimmed.starts_with(format!("{key}:").as_str())
+        })
+        .map(|(index, _)| index);
+    let index = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(index)
+}
+
+fn find_unique_active_setting_index(
+    path: &Path,
+    lines: &[String],
+    key: &str,
+) -> Result<usize, InstallError> {
+    let Some(index) = find_optional_active_setting_index(lines, key) else {
+        return Err(InstallError::HookConflict {
+            path: path.to_path_buf(),
+            message: format!("required active nsswitch entry '{key}:' was not found"),
+        });
+    };
+    let duplicates = lines
+        .iter()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with('#') && trimmed.starts_with(format!("{key}:").as_str())
+        })
+        .count();
+    if duplicates > 1 {
+        return Err(InstallError::HookConflict {
+            path: path.to_path_buf(),
+            message: format!("expected exactly one active '{key}:' entry before installing hooks"),
+        });
+    }
+    Ok(index)
+}
+
+fn restore_nsswitch_original_lines(path: &Path, contents: &str) -> Result<String, InstallError> {
+    let mut lines = to_lines(contents);
+    for block_id in [
+        NSS_PASSWD_BLOCK_ID,
+        NSS_GROUP_BLOCK_ID,
+        NSS_SHADOW_BLOCK_ID,
+        NSS_INITGROUPS_BLOCK_ID,
+    ] {
+        if let Some((start, end)) = find_managed_block_range(path, &lines, block_id)? {
+            if let Some(original) = parse_optional_preserved_original_line(&lines[start..end]) {
+                lines.splice(start..end, [original]);
+            } else {
+                lines.drain(start..end);
+            }
+        }
+    }
+    Ok(from_lines(&lines))
+}
+
+fn remove_managed_blocks(
+    path: &Path,
+    contents: &str,
+    block_ids: &[&str],
+) -> Result<String, InstallError> {
+    let mut lines = to_lines(contents);
+    for block_id in block_ids {
+        if let Some((start, end)) = find_managed_block_range(path, &lines, block_id)? {
+            lines.drain(start..end);
+        }
+    }
+    Ok(from_lines(&lines))
+}
+
+fn replace_existing_block(
+    path: &Path,
+    lines: &mut Vec<String>,
+    block_id: &str,
+    replacement: &[String],
+) -> Result<bool, InstallError> {
+    if let Some((start, end)) = find_managed_block_range(path, lines, block_id)? {
+        lines.splice(start..end, replacement.iter().cloned());
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn parse_optional_preserved_original_line(block_lines: &[String]) -> Option<String> {
+    block_lines
+        .iter()
+        .find_map(|line| line.strip_prefix(PRESERVED_ORIGINAL_PREFIX))
+        .map(str::to_string)
+}
+
+fn active_nsswitch_sources(
+    path: &Path,
+    lines: &[String],
+    key: &str,
+) -> Result<Vec<String>, InstallError> {
+    let index = find_unique_active_setting_index(path, lines, key)?;
+    parse_nsswitch_sources(path, key, lines[index].as_str())
+}
+
+fn parse_nsswitch_sources(path: &Path, key: &str, line: &str) -> Result<Vec<String>, InstallError> {
+    let (line_key, rest) = line
+        .split_once(':')
+        .ok_or_else(|| InstallError::HookConflict {
+            path: path.to_path_buf(),
+            message: format!("invalid nsswitch line for '{key}': {line}"),
+        })?;
+    if line_key.trim() != key {
+        return Err(InstallError::HookConflict {
+            path: path.to_path_buf(),
+            message: format!("expected '{key}:' entry but found '{line_key}:'"),
+        });
+    }
+    let sources = rest
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return Err(InstallError::HookConflict {
+            path: path.to_path_buf(),
+            message: format!("nsswitch entry '{key}:' has no configured sources"),
+        });
+    }
+    Ok(sources)
+}
+
+fn render_managed_nsswitch_line(
+    path: &Path,
+    key: &str,
+    original_line: &str,
+    group_fallback_sources: Option<&[String]>,
+) -> Result<String, InstallError> {
+    let mut sources = if key == "initgroups" && original_line.trim() == "initgroups: files" {
+        group_fallback_sources
+            .map(|value| value.to_vec())
+            .unwrap_or_else(|| vec!["files".to_string()])
+    } else {
+        parse_nsswitch_sources(path, key, original_line)?
+    };
+
+    if sources.iter().any(|source| source == "walle") {
+        return Err(InstallError::HookConflict {
+            path: path.to_path_buf(),
+            message: format!("nsswitch entry '{key}:' already contains unmanaged 'walle'"),
+        });
+    }
+    let Some(files_index) = sources.iter().position(|source| source == "files") else {
+        return Err(InstallError::HookConflict {
+            path: path.to_path_buf(),
+            message: format!(
+                "nsswitch entry '{key}:' must contain 'files' before Walle can install hooks"
+            ),
+        });
+    };
+    sources.insert(files_index + 1, "walle".to_string());
+    Ok(format!("{key}: {}", sources.join(" ")))
+}
+
+fn find_initgroups_insert_index(path: &Path, lines: &[String]) -> Result<usize, InstallError> {
+    if let Some((_, end)) = find_managed_block_range(path, lines, NSS_GROUP_BLOCK_ID)? {
+        return Ok(end);
+    }
+    Ok(find_unique_active_setting_index(path, lines, "group")? + 1)
+}
+
+fn find_managed_block_range(
+    path: &Path,
+    lines: &[String],
+    block_id: &str,
+) -> Result<Option<(usize, usize)>, InstallError> {
+    let start_marker = format!("{MANAGED_START_PREFIX}{block_id}");
+    let end_marker = format!("{MANAGED_END_PREFIX}{block_id}");
+    let mut start = None;
+
+    for (index, line) in lines.iter().enumerate() {
+        if line == &start_marker {
+            if start.is_some() {
+                return Err(InstallError::InvalidHookManagedBlock {
+                    path: path.to_path_buf(),
+                    message: format!("managed block '{block_id}' has multiple start markers"),
+                });
+            }
+            start = Some(index);
+            continue;
+        }
+        if line == &end_marker {
+            let Some(start_index) = start else {
+                return Err(InstallError::InvalidHookManagedBlock {
+                    path: path.to_path_buf(),
+                    message: format!(
+                        "managed block '{block_id}' has an end marker without a start marker"
+                    ),
+                });
+            };
+            return Ok(Some((start_index, index + 1)));
+        }
+    }
+
+    if start.is_some() {
+        return Err(InstallError::InvalidHookManagedBlock {
+            path: path.to_path_buf(),
+            message: format!("managed block '{block_id}' is missing an end marker"),
+        });
+    }
+
+    Ok(None)
+}
+
+fn collect_managed_block_ids(path: &Path, contents: &str) -> Result<Vec<String>, InstallError> {
+    let lines = to_lines(contents);
+    let mut block_ids = Vec::new();
+    for line in &lines {
+        if let Some(block_id) = line.strip_prefix(MANAGED_START_PREFIX) {
+            let block_id = block_id.trim().to_string();
+            let _ = find_managed_block_range(path, &lines, block_id.as_str())?;
+            block_ids.push(block_id);
+        }
+    }
+    Ok(block_ids)
+}
+
+fn managed_block(block_id: &str, managed_content: &str, original: Option<&str>) -> Vec<String> {
+    let mut lines = vec![format!("{MANAGED_START_PREFIX}{block_id}")];
+    if let Some(original_line) = original {
+        lines.push(format!("{PRESERVED_ORIGINAL_PREFIX}{original_line}"));
+    }
+    lines.extend(to_lines(managed_content));
+    lines.push(format!("{MANAGED_END_PREFIX}{block_id}"));
+    lines
+}
+
+fn to_lines(contents: &str) -> Vec<String> {
+    contents.lines().map(str::to_string).collect()
+}
+
+fn from_lines(lines: &[String]) -> String {
+    if lines.is_empty() {
+        String::new()
+    } else {
+        let mut rendered = lines.join("\n");
+        rendered.push('\n');
+        rendered
+    }
+}
+
+fn render_unified_diff(path: &Path, before: &str, after: &str) -> String {
+    const CONTEXT_LINES: usize = 10;
+
+    let before_lines = to_lines(before);
+    let after_lines = to_lines(after);
+    let ops = build_diff_ops(&before_lines, &after_lines);
+    let mut output = String::new();
+    output.push_str(&format!("--- {}\n", path.display()));
+    output.push_str(&format!("+++ {}\n", path.display()));
+
+    let changed_indices = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, op)| (!matches!(op, DiffOp::Equal(_))).then_some(index))
+        .collect::<Vec<_>>();
+    if changed_indices.is_empty() {
+        return output;
+    }
+
+    for (start, end) in diff_hunk_ranges(&changed_indices, ops.len(), CONTEXT_LINES) {
+        let (old_start, new_start) = diff_positions_before(&ops, start);
+        let old_count = diff_old_line_count(&ops[start..end]);
+        let new_count = diff_new_line_count(&ops[start..end]);
+        output.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            old_start + 1,
+            old_count,
+            new_start + 1,
+            new_count
+        ));
+        for op in &ops[start..end] {
+            match op {
+                DiffOp::Equal(line) => output.push_str(&format!(" {}\n", line)),
+                DiffOp::Delete(line) => output.push_str(&format!("-{}\n", line)),
+                DiffOp::Insert(line) => output.push_str(&format!("+{}\n", line)),
+            }
+        }
+    }
+    output
+}
+
+enum DiffOp {
+    Equal(String),
+    Delete(String),
+    Insert(String),
+}
+
+fn build_diff_ops(before_lines: &[String], after_lines: &[String]) -> Vec<DiffOp> {
+    let n = before_lines.len();
+    let m = after_lines.len();
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if before_lines[i] == after_lines[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut ops = Vec::new();
+    while i < n && j < m {
+        if before_lines[i] == after_lines[j] {
+            ops.push(DiffOp::Equal(before_lines[i].clone()));
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            ops.push(DiffOp::Delete(before_lines[i].clone()));
+            i += 1;
+        } else {
+            ops.push(DiffOp::Insert(after_lines[j].clone()));
+            j += 1;
+        }
+    }
+    while i < n {
+        ops.push(DiffOp::Delete(before_lines[i].clone()));
+        i += 1;
+    }
+    while j < m {
+        ops.push(DiffOp::Insert(after_lines[j].clone()));
+        j += 1;
+    }
+    ops
+}
+
+fn diff_hunk_ranges(
+    changed_indices: &[usize],
+    total_ops: usize,
+    context_lines: usize,
+) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    for &index in changed_indices {
+        let start = index.saturating_sub(context_lines);
+        let end = (index + context_lines + 1).min(total_ops);
+        if let Some((_, previous_end)) = ranges.last_mut()
+            && start <= *previous_end
+        {
+            *previous_end = (*previous_end).max(end);
+            continue;
+        }
+        ranges.push((start, end));
+    }
+    ranges
+}
+
+fn diff_positions_before(ops: &[DiffOp], offset: usize) -> (usize, usize) {
+    let mut old_line = 0usize;
+    let mut new_line = 0usize;
+    for op in &ops[..offset] {
+        match op {
+            DiffOp::Equal(_) => {
+                old_line += 1;
+                new_line += 1;
+            }
+            DiffOp::Delete(_) => old_line += 1,
+            DiffOp::Insert(_) => new_line += 1,
+        }
+    }
+    (old_line, new_line)
+}
+
+fn diff_old_line_count(ops: &[DiffOp]) -> usize {
+    ops.iter()
+        .filter(|op| matches!(op, DiffOp::Equal(_) | DiffOp::Delete(_)))
+        .count()
+}
+
+fn diff_new_line_count(ops: &[DiffOp]) -> usize {
+    ops.iter()
+        .filter(|op| matches!(op, DiffOp::Equal(_) | DiffOp::Insert(_)))
+        .count()
 }
 
 #[cfg(target_os = "linux")]
@@ -438,6 +1476,13 @@ fn copy_with_parents(source: &Path, destination: &Path) -> Result<(), InstallErr
     Ok(())
 }
 
+fn read_file(path: &Path) -> Result<String, InstallError> {
+    fs::read_to_string(path).map_err(|source| InstallError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 fn write_file(path: &Path, content: &str) -> Result<(), InstallError> {
     create_parent_dir(path)?;
     fs::write(path, content).map_err(|source| InstallError::WriteFile {
@@ -483,6 +1528,34 @@ fn remove_file_if_exists(path: &Path) -> Result<bool, InstallError> {
             source,
         }),
     }
+}
+
+fn atomic_write_file(path: &Path, content: &str) -> Result<(), InstallError> {
+    create_parent_dir(path)?;
+    let parent = path.parent().ok_or_else(|| InstallError::WriteFile {
+        path: path.to_path_buf(),
+        source: std::io::Error::other("missing parent directory"),
+    })?;
+    let temp_path = parent.join(format!(
+        ".{}.walle-tmp-{}-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config"),
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    fs::write(&temp_path, content).map_err(|source| InstallError::WriteFile {
+        path: temp_path.clone(),
+        source,
+    })?;
+    fs::rename(&temp_path, path).map_err(|source| InstallError::WriteFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
 }
 
 fn default_config_template() -> &'static str {
@@ -590,6 +1663,11 @@ pub enum InstallError {
             .join(", ")
     )]
     MissingPamModule { searched: Vec<PathBuf> },
+    #[error("failed to read '{path}': {source}")]
+    ReadFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to create directory '{path}': {source}")]
     CreateDir {
         path: PathBuf,
@@ -611,11 +1689,19 @@ pub enum InstallError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("hook install conflict in '{path}': {message}")]
+    HookConflict { path: PathBuf, message: String },
+    #[error("invalid managed hook block in '{path}': {message}")]
+    InvalidHookManagedBlock { path: PathBuf, message: String },
+    #[error("'{path}' changed after preview confirmation; rerun the hook command")]
+    HookChangedDuringConfirmation { path: PathBuf },
+    #[error("no hook backup exists for '{path}'; expected backup at '{backup_path}'")]
+    MissingHookBackup { path: PathBuf, backup_path: PathBuf },
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
@@ -623,10 +1709,15 @@ mod tests {
         INSTALL_NSS_OVERLAY_SAMPLE_RELATIVE_PATH, INSTALL_OBJECT_RELATIVE_PATH,
         INSTALL_PAM_MODULE_RELATIVE_PATH, INSTALL_PAM_OVERLAY_SAMPLE_RELATIVE_PATH,
         INSTALL_SCRIPT_RELATIVE_PATH, INSTALL_SSH_OVERLAY_SAMPLE_RELATIVE_PATH,
-        INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH, INSTALL_UNIT_RELATIVE_PATH, InstallOptions,
-        ServiceManager, UninstallOptions, bundled_nss_module_path, bundled_pam_module_path,
-        default_config_template, install_with_sources, join_root, resolve_nss_module,
-        resolve_pam_module, resolve_xdp_object, uninstall,
+        INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH, INSTALL_UNIT_RELATIVE_PATH, InstallError,
+        InstallOptions, NSSWITCH_CONFIG_RELATIVE_PATH, PAM_ACCOUNT_BLOCK_ID, PAM_AUTH_BLOCK_ID,
+        PAM_SESSION_BLOCK_ID, SSHD_BLOCK_ID, SSHD_CONFIG_RELATIVE_PATH,
+        SSHD_PAM_CONFIG_RELATIVE_PATH, ServiceManager, SshOverlayHookOptions, UninstallOptions,
+        apply_ssh_overlay_hook_plan, bundled_nss_module_path, bundled_pam_module_path,
+        default_config_template, disable_ssh_overlay_hooks, hook_backup_path, hook_target_path,
+        install_with_sources, join_root, plan_ssh_overlay_hook_install, resolve_nss_module,
+        resolve_pam_module, resolve_xdp_object, restore_ssh_overlay_hook_backup,
+        ssh_overlay_hook_status, uninstall,
     };
     use crate::xdp::bundled_object_path;
 
@@ -866,5 +1957,233 @@ mod tests {
         assert!(!join_root(&root, INSTALL_TRAP_LOGIN_SHELL_RELATIVE_PATH).exists());
         assert!(!join_root(&root, INSTALL_SCRIPT_RELATIVE_PATH).exists());
         assert!(join_root(&root, INSTALL_CONFIG_RELATIVE_PATH).exists());
+    }
+
+    fn write_hook_target_files(root: &Path) {
+        let sshd_path = hook_target_path(root, super::HookTargetKind::Sshd);
+        let nsswitch_path = hook_target_path(root, super::HookTargetKind::Nsswitch);
+        let pam_path = hook_target_path(root, super::HookTargetKind::PamSshd);
+
+        std::fs::create_dir_all(sshd_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &sshd_path,
+            "Port 22\nUsePAM yes\nMatch User deploy\n    X11Forwarding no\n",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(nsswitch_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &nsswitch_path,
+            "passwd:         files systemd\ngroup:          files systemd\nshadow:         files systemd\ngshadow:        files systemd\n\nhosts:          files dns\n",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(pam_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &pam_path,
+            "auth requisite pam_nologin.so\n@include common-auth\naccount requisite pam_nologin.so\n@include common-account\nsession required pam_keyinit.so force revoke\n@include common-session\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ssh_overlay_hook_plan_applies_and_creates_backups() {
+        let root = temp_root("overlay-hook-install");
+        write_hook_target_files(&root);
+
+        let plan =
+            plan_ssh_overlay_hook_install(SshOverlayHookOptions { root: root.clone() }).unwrap();
+        assert_eq!(plan.changed_paths.len(), 3);
+        assert!(plan.preview.contains("--- "));
+        assert!(plan.preview.contains("+++ "));
+        assert!(
+            plan.preview
+                .contains("AuthorizedKeysCommand /usr/local/bin/walle ssh overlay authorized-keys")
+        );
+
+        let report = apply_ssh_overlay_hook_plan(plan).unwrap();
+        assert_eq!(report.changed_paths.len(), 3);
+        assert_eq!(report.backup_paths_created.len(), 3);
+
+        let sshd = std::fs::read_to_string(join_root(&root, SSHD_CONFIG_RELATIVE_PATH)).unwrap();
+        assert!(sshd.contains("# managed by walle start sshd-authorized-keys"));
+        assert!(sshd.contains("AuthorizedKeysCommandUser root"));
+        assert!(
+            sshd.find("AuthorizedKeysCommand").unwrap() < sshd.find("Match User deploy").unwrap()
+        );
+
+        let nsswitch =
+            std::fs::read_to_string(join_root(&root, NSSWITCH_CONFIG_RELATIVE_PATH)).unwrap();
+        assert!(nsswitch.contains("# managed by walle start nsswitch-passwd"));
+        assert!(nsswitch.contains("# original by walle: passwd:         files systemd"));
+        assert!(nsswitch.contains("passwd: files walle systemd"));
+        assert!(nsswitch.contains("shadow: files walle systemd"));
+        assert!(nsswitch.contains("# managed by walle start nsswitch-initgroups"));
+        assert!(nsswitch.contains("initgroups: files walle systemd"));
+
+        let pam = std::fs::read_to_string(join_root(&root, SSHD_PAM_CONFIG_RELATIVE_PATH)).unwrap();
+        assert!(pam.contains("# managed by walle start pam-auth"));
+        assert!(pam.contains("# managed by walle start pam-account"));
+        assert!(pam.contains("# managed by walle start pam-session"));
+
+        for kind in [
+            super::HookTargetKind::Sshd,
+            super::HookTargetKind::Nsswitch,
+            super::HookTargetKind::PamSshd,
+        ] {
+            assert!(hook_backup_path(&root, kind).exists());
+        }
+    }
+
+    #[test]
+    fn ssh_overlay_hook_disable_restores_original_nsswitch_and_removes_blocks() {
+        let root = temp_root("overlay-hook-disable");
+        write_hook_target_files(&root);
+        let plan =
+            plan_ssh_overlay_hook_install(SshOverlayHookOptions { root: root.clone() }).unwrap();
+        apply_ssh_overlay_hook_plan(plan).unwrap();
+
+        let report =
+            disable_ssh_overlay_hooks(SshOverlayHookOptions { root: root.clone() }).unwrap();
+        assert_eq!(report.changed_paths.len(), 3);
+
+        let sshd = std::fs::read_to_string(join_root(&root, SSHD_CONFIG_RELATIVE_PATH)).unwrap();
+        assert!(!sshd.contains(SSHD_BLOCK_ID));
+        assert!(!sshd.contains("AuthorizedKeysCommand "));
+
+        let nsswitch =
+            std::fs::read_to_string(join_root(&root, NSSWITCH_CONFIG_RELATIVE_PATH)).unwrap();
+        assert!(nsswitch.contains("passwd:         files systemd"));
+        assert!(nsswitch.contains("group:          files systemd"));
+        assert!(nsswitch.contains("shadow:         files systemd"));
+        assert!(!nsswitch.contains("initgroups:"));
+        assert!(!nsswitch.contains("managed by walle"));
+
+        let pam = std::fs::read_to_string(join_root(&root, SSHD_PAM_CONFIG_RELATIVE_PATH)).unwrap();
+        assert!(!pam.contains(PAM_AUTH_BLOCK_ID));
+        assert!(!pam.contains(PAM_ACCOUNT_BLOCK_ID));
+        assert!(!pam.contains(PAM_SESSION_BLOCK_ID));
+        assert!(!pam.contains("/usr/local/lib/walle/pam_walle.so"));
+    }
+
+    #[test]
+    fn ssh_overlay_hook_restore_backup_restores_original_files() {
+        let root = temp_root("overlay-hook-restore");
+        write_hook_target_files(&root);
+        let original_sshd =
+            std::fs::read_to_string(join_root(&root, SSHD_CONFIG_RELATIVE_PATH)).unwrap();
+        let original_nsswitch =
+            std::fs::read_to_string(join_root(&root, NSSWITCH_CONFIG_RELATIVE_PATH)).unwrap();
+        let original_pam =
+            std::fs::read_to_string(join_root(&root, SSHD_PAM_CONFIG_RELATIVE_PATH)).unwrap();
+        let plan =
+            plan_ssh_overlay_hook_install(SshOverlayHookOptions { root: root.clone() }).unwrap();
+        apply_ssh_overlay_hook_plan(plan).unwrap();
+
+        let report =
+            restore_ssh_overlay_hook_backup(SshOverlayHookOptions { root: root.clone() }).unwrap();
+        assert_eq!(report.changed_paths.len(), 3);
+        assert_eq!(
+            std::fs::read_to_string(join_root(&root, SSHD_CONFIG_RELATIVE_PATH)).unwrap(),
+            original_sshd
+        );
+        assert_eq!(
+            std::fs::read_to_string(join_root(&root, NSSWITCH_CONFIG_RELATIVE_PATH)).unwrap(),
+            original_nsswitch
+        );
+        assert_eq!(
+            std::fs::read_to_string(join_root(&root, SSHD_PAM_CONFIG_RELATIVE_PATH)).unwrap(),
+            original_pam
+        );
+    }
+
+    #[test]
+    fn ssh_overlay_hook_status_reports_expected_blocks_and_backups() {
+        let root = temp_root("overlay-hook-status");
+        write_hook_target_files(&root);
+        let plan =
+            plan_ssh_overlay_hook_install(SshOverlayHookOptions { root: root.clone() }).unwrap();
+        apply_ssh_overlay_hook_plan(plan).unwrap();
+
+        let status = ssh_overlay_hook_status(SshOverlayHookOptions { root: root.clone() }).unwrap();
+        assert_eq!(status.entries.len(), 3);
+        assert!(status.entries.iter().all(|entry| entry.backup_exists));
+        assert!(
+            status
+                .entries
+                .iter()
+                .any(|entry| entry.present_block_ids.contains(&SSHD_BLOCK_ID.to_string()))
+        );
+        assert!(status.entries.iter().all(|entry| {
+            entry
+                .expected_block_ids
+                .iter()
+                .all(|id| entry.present_block_ids.contains(id))
+        }));
+    }
+
+    #[test]
+    fn ssh_overlay_hook_plan_fails_closed_on_existing_authorized_keys_command() {
+        let root = temp_root("overlay-hook-conflict");
+        write_hook_target_files(&root);
+        let sshd_path = join_root(&root, SSHD_CONFIG_RELATIVE_PATH);
+        std::fs::write(
+            &sshd_path,
+            "Port 22\nAuthorizedKeysCommand /usr/local/bin/custom\nUsePAM yes\n",
+        )
+        .unwrap();
+
+        let error = plan_ssh_overlay_hook_install(SshOverlayHookOptions { root: root.clone() })
+            .unwrap_err();
+        match error {
+            InstallError::HookConflict { path, .. } => assert_eq!(path, sshd_path),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn ssh_overlay_hook_apply_rejects_file_changes_after_preview() {
+        let root = temp_root("overlay-hook-race");
+        write_hook_target_files(&root);
+        let plan =
+            plan_ssh_overlay_hook_install(SshOverlayHookOptions { root: root.clone() }).unwrap();
+        std::fs::write(
+            join_root(&root, NSSWITCH_CONFIG_RELATIVE_PATH),
+            "passwd: files alt\n",
+        )
+        .unwrap();
+
+        let error = apply_ssh_overlay_hook_plan(plan).unwrap_err();
+        match error {
+            InstallError::HookChangedDuringConfirmation { path } => {
+                assert_eq!(path, join_root(&root, NSSWITCH_CONFIG_RELATIVE_PATH))
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn unified_diff_preview_only_shows_changed_hunk_with_context() {
+        let before = (1..=40)
+            .map(|index| format!("alpha-{index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let mut after_lines = (1..=40)
+            .map(|index| format!("alpha-{index:02}"))
+            .collect::<Vec<_>>();
+        after_lines[19] = "beta-20".to_string();
+        let after = after_lines.join("\n") + "\n";
+
+        let rendered =
+            super::render_unified_diff(PathBuf::from("/tmp/example").as_path(), &before, &after);
+
+        assert!(rendered.contains("@@ -10,21 +10,21 @@"));
+        assert!(rendered.contains(" alpha-10"));
+        assert!(rendered.contains("-alpha-20"));
+        assert!(rendered.contains("+beta-20"));
+        assert!(rendered.contains(" alpha-30"));
+        assert!(!rendered.contains(" alpha-09"));
+        assert!(!rendered.contains(" alpha-31"));
     }
 }

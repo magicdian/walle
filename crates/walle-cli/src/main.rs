@@ -2,11 +2,16 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{self, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, io, io::IsTerminal, io::Write};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use walle_common::{AccessMode, IcmpMode};
-use walle_daemon::install::{InstallOptions, UninstallOptions, uninstall};
+use walle_daemon::install::{
+    InstallOptions, SshOverlayHookOptions, UninstallOptions, apply_ssh_overlay_hook_plan,
+    disable_ssh_overlay_hooks, plan_ssh_overlay_hook_install, restore_ssh_overlay_hook_backup,
+    ssh_overlay_hook_status, uninstall,
+};
 use walle_daemon::logging::{format_unix_timestamp_secs, init_tracing};
 use walle_daemon::ssh_overlay::{
     AuthorizedKeysTrapRequest, evaluate_authorized_keys_trap, gp_containment_enabled,
@@ -184,6 +189,22 @@ enum SshOverlayCommand {
     PrintSshdConfig,
     PrintNsswitchConfig,
     PrintPamConfig,
+    InstallHooks {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    HookStatus {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    HookDisable {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    HookRestoreBackup {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -332,8 +353,7 @@ fn install_command(args: InstallArgs) -> Result<()> {
     println!("service_manager: {}", report.service_manager.as_str());
     println!("service_path: {}", report.service_path.display());
     println!(
-        "next_step: run ldconfig, review {}, merge {} into sshd_config, {} into /etc/nsswitch.conf, and {} into /etc/pam.d/sshd, then start the service or fallback runner",
-        walle_policy::DEFAULT_CONFIG_PATH,
+        "next_step: run ldconfig, then either review {} / {} / {} manually or use `walle ssh overlay install-hooks`, then start the service or fallback runner",
         report.ssh_overlay_sample_path.display(),
         report.nss_overlay_sample_path.display(),
         report.pam_overlay_sample_path.display()
@@ -781,9 +801,124 @@ fn handle_ssh_overlay(command: SshOverlayCommand) -> Result<()> {
                 )
             );
         }
+        SshOverlayCommand::InstallHooks { root } => {
+            let plan = plan_ssh_overlay_hook_install(SshOverlayHookOptions {
+                root: root.unwrap_or_else(|| PathBuf::from("/")),
+            })?;
+            if plan.changed_paths.is_empty() {
+                println!("hook_status: already up to date");
+                return Ok(());
+            }
+            print!("{}", render_diff_preview(plan.preview.as_str()));
+            if !confirm_apply()? {
+                println!("hook_install: aborted");
+                return Ok(());
+            }
+            let report = apply_ssh_overlay_hook_plan(plan)?;
+            for backup_path in report.backup_paths_created {
+                println!("backup_created: {}", backup_path.display());
+            }
+            for path in report.changed_paths {
+                println!("hook_updated: {}", path.display());
+            }
+        }
+        SshOverlayCommand::HookStatus { root } => {
+            let report = ssh_overlay_hook_status(SshOverlayHookOptions {
+                root: root.unwrap_or_else(|| PathBuf::from("/")),
+            })?;
+            print_hook_status(&report);
+        }
+        SshOverlayCommand::HookDisable { root } => {
+            let report = disable_ssh_overlay_hooks(SshOverlayHookOptions {
+                root: root.unwrap_or_else(|| PathBuf::from("/")),
+            })?;
+            if report.changed_paths.is_empty() {
+                println!("hook_disable: no managed overlay hooks found");
+            } else {
+                for path in report.changed_paths {
+                    println!("hook_disabled: {}", path.display());
+                }
+            }
+        }
+        SshOverlayCommand::HookRestoreBackup { root } => {
+            let report = restore_ssh_overlay_hook_backup(SshOverlayHookOptions {
+                root: root.unwrap_or_else(|| PathBuf::from("/")),
+            })?;
+            if report.changed_paths.is_empty() {
+                println!("hook_restore_backup: already matches backup");
+            } else {
+                for path in report.changed_paths {
+                    println!("hook_restored: {}", path.display());
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn confirm_apply() -> Result<bool> {
+    print!("apply these hook changes? [y/N]: ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(matches!(input.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+}
+
+fn print_hook_status(report: &walle_daemon::install::SshOverlayHookStatusReport) {
+    for entry in &report.entries {
+        println!("path: {}", entry.path.display());
+        println!(
+            "managed_blocks_present: {}",
+            if entry.present_block_ids.is_empty() {
+                "(none)".to_string()
+            } else {
+                entry.present_block_ids.join(",")
+            }
+        );
+        println!("backup_path: {}", entry.backup_path.display());
+        println!("backup_exists: {}", entry.backup_exists);
+        println!(
+            "all_expected_blocks_present: {}",
+            entry.present_block_ids.len() == entry.expected_block_ids.len()
+                && entry
+                    .expected_block_ids
+                    .iter()
+                    .all(|id| entry.present_block_ids.contains(id))
+        );
+    }
+}
+
+fn render_diff_preview(preview: &str) -> String {
+    colorize_diff_preview(preview, diff_preview_colors_enabled())
+}
+
+fn colorize_diff_preview(preview: &str, enable_color: bool) -> String {
+    if !enable_color {
+        return preview.to_string();
+    }
+
+    let mut rendered = String::new();
+    for line in preview.lines() {
+        let colored_line = if line.starts_with('+') && !line.starts_with("+++") {
+            format!("\x1b[30;42m{line}\x1b[0m")
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            format!("\x1b[37;41m{line}\x1b[0m")
+        } else if line.starts_with("@@") {
+            format!("\x1b[36m{line}\x1b[0m")
+        } else {
+            line.to_string()
+        };
+        rendered.push_str(colored_line.as_str());
+        rendered.push('\n');
+    }
+    rendered
+}
+
+fn diff_preview_colors_enabled() -> bool {
+    io::stdout().is_terminal()
+        && env::var_os("NO_COLOR").is_none()
+        && env::var("TERM").map(|term| term != "dumb").unwrap_or(true)
 }
 
 fn handle_ssh_gp(command: SshGpCommand) -> Result<()> {
@@ -944,8 +1079,9 @@ fn handle_icmp(command: IcmpCommand) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use std::path::PathBuf;
 
-    use super::{Cli, Command, SshCommand, SshGpCommand, SshOverlayCommand};
+    use super::{Cli, Command, SshCommand, SshGpCommand, SshOverlayCommand, colorize_diff_preview};
 
     #[test]
     fn ssh_gp_stress_test_parses_defaults() {
@@ -1146,5 +1282,78 @@ mod tests {
             panic!("expected ssh overlay subcommand");
         };
         assert!(matches!(command, SshOverlayCommand::PrintPamConfig));
+    }
+
+    #[test]
+    fn ssh_overlay_install_hooks_parses_root() {
+        let cli = Cli::parse_from([
+            "walle",
+            "ssh",
+            "overlay",
+            "install-hooks",
+            "--root",
+            "/tmp/walle-host",
+        ]);
+        let Command::Ssh(args) = cli.command else {
+            panic!("expected ssh command");
+        };
+        let SshCommand::Overlay { command } = args.command else {
+            panic!("expected ssh overlay subcommand");
+        };
+        let SshOverlayCommand::InstallHooks { root } = command else {
+            panic!("expected install-hooks subcommand");
+        };
+        assert_eq!(root, Some(PathBuf::from("/tmp/walle-host")));
+    }
+
+    #[test]
+    fn ssh_overlay_hook_status_parses() {
+        let cli = Cli::parse_from(["walle", "ssh", "overlay", "hook-status"]);
+        let Command::Ssh(args) = cli.command else {
+            panic!("expected ssh command");
+        };
+        let SshCommand::Overlay { command } = args.command else {
+            panic!("expected ssh overlay subcommand");
+        };
+        assert!(matches!(command, SshOverlayCommand::HookStatus { .. }));
+    }
+
+    #[test]
+    fn ssh_overlay_hook_disable_parses() {
+        let cli = Cli::parse_from(["walle", "ssh", "overlay", "hook-disable"]);
+        let Command::Ssh(args) = cli.command else {
+            panic!("expected ssh command");
+        };
+        let SshCommand::Overlay { command } = args.command else {
+            panic!("expected ssh overlay subcommand");
+        };
+        assert!(matches!(command, SshOverlayCommand::HookDisable { .. }));
+    }
+
+    #[test]
+    fn ssh_overlay_hook_restore_backup_parses() {
+        let cli = Cli::parse_from(["walle", "ssh", "overlay", "hook-restore-backup"]);
+        let Command::Ssh(args) = cli.command else {
+            panic!("expected ssh command");
+        };
+        let SshCommand::Overlay { command } = args.command else {
+            panic!("expected ssh overlay subcommand");
+        };
+        assert!(matches!(
+            command,
+            SshOverlayCommand::HookRestoreBackup { .. }
+        ));
+    }
+
+    #[test]
+    fn diff_preview_colorizes_added_and_deleted_lines_when_enabled() {
+        let preview = "--- /tmp/example\n+++ /tmp/example\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+        let rendered = colorize_diff_preview(preview, true);
+
+        assert!(rendered.contains("--- /tmp/example"));
+        assert!(rendered.contains("+++ /tmp/example"));
+        assert!(rendered.contains("\x1b[36m@@ -1,1 +1,1 @@\x1b[0m"));
+        assert!(rendered.contains("\x1b[37;41m-old\x1b[0m"));
+        assert!(rendered.contains("\x1b[30;42m+new\x1b[0m"));
     }
 }

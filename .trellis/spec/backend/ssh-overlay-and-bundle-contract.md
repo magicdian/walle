@@ -19,18 +19,26 @@
   * `walle ssh overlay print-sshd-config`
   * `walle ssh overlay print-nsswitch-config`
   * `walle ssh overlay print-pam-config`
+  * `walle ssh overlay install-hooks`
+  * `walle ssh overlay hook-status`
+  * `walle ssh overlay hook-disable`
+  * `walle ssh overlay hook-restore-backup`
 * Install-rendered files:
   * `/usr/local/lib/walle/walle-ssh-overlay.conf.sample`
   * `/usr/local/lib/walle/walle-nsswitch.conf.sample`
   * `/usr/local/lib/walle/walle-sshd-pam.conf.sample`
   * `/usr/local/lib/walle/walle-ssh-overlay-shell`
+* Managed backup files:
+  * `/etc/walle/ssh-overlay-hooks/sshd_config.pre-walle`
+  * `/etc/walle/ssh-overlay-hooks/nsswitch.conf.pre-walle`
+  * `/etc/walle/ssh-overlay-hooks/pam_sshd.pre-walle`
 * Real host config fragments:
   * `AuthorizedKeysCommand /usr/local/bin/walle ssh overlay authorized-keys --user %u --uid %U --home %h --key-type %t --key-base64 %k --fingerprint %f`
   * `AuthorizedKeysCommandUser root`
   * `passwd: files walle systemd`
   * `group: files walle systemd`
-  * `shadow: files walle`
-  * `initgroups: files walle`
+  * `shadow: files walle systemd`
+  * `initgroups: files walle systemd`
   * `auth    [success=done default=ignore] /usr/local/lib/walle/pam_walle.so`
   * `account [success=done default=ignore] /usr/local/lib/walle/pam_walle.so`
   * `session [success=done default=ignore] /usr/local/lib/walle/pam_walle.so`
@@ -39,10 +47,23 @@
 
 * Real users must continue to authenticate against the real host `sshd`; Walle is an overlay, not a replacement SSH server for legitimate traffic.
 * `files` must stay before `walle` in `/etc/nsswitch.conf` so real system identities win before runtime trap identities.
+* Existing NSS sources must be preserved in order; Walle inserts `walle` immediately after `files` instead of replacing the rest of the source list.
+* If `initgroups:` is absent in `/etc/nsswitch.conf`, `install-hooks` may add a managed `initgroups` block; missing `passwd:`, `group:`, or `shadow:` entries remain fatal.
 * The PAM lines must be inserted in the documented order:
   * `auth` before `@include common-auth`
   * `account` after `pam_nologin.so` and before `@include common-account`
   * `session` after `pam_keyinit.so` and before `@include common-session`
+* Hook installation is strict and fail-closed:
+  * if `sshd_config` already contains unmanaged `AuthorizedKeysCommand` settings, abort
+  * if the expected PAM anchors are missing, abort
+  * if `passwd:`, `group:`, or `shadow:` are missing from `nsswitch.conf`, abort
+  * do not attempt smart merges of security-sensitive host config
+* Hook installation must preview the changes and require explicit confirmation before writing.
+* The preview must render unified-diff hunks only, with 10 lines of surrounding context for each changed region.
+* Backend preview rendering stays plain text; CLI color is optional presentation-only behavior and may colorize hunk headers cyan plus deletions/additions red/green when stdout supports ANSI.
+* Hook installation must create backups before the first managed edit of each target file.
+* `hook-disable` removes Walle-managed hook content while preserving unrelated later operator edits when possible.
+* `hook-restore-backup` restores the pre-hook backup files exactly.
 * `AuthorizedKeysCommand` must fail open when the daemon runtime lock is absent, config load fails, or GP containment is disabled.
 * `trap-shell` and `trap-login` are different entrypoints:
   * `trap-shell` consumes a pending forced-command token
@@ -66,7 +87,7 @@
   * `root` with a blacklisted key lands in a local trap session while normal users remain unaffected.
   * `tomcat` first appears as an invalid user in real `sshd`, then becomes a runtime trap identity for the lifetime of that daemon process.
 * Base:
-  * if operators only merge the `sshd_config` fragment, blacklisted-key trap can still work for real valid users, while invalid-user overlay behavior remains incomplete without NSS/PAM.
+  * if operators only install the `sshd` hook behavior, blacklisted-key trap can still work for real valid users, while invalid-user overlay behavior remains incomplete without NSS/PAM.
 * Bad:
   * putting `walle` before `files` in `nsswitch.conf`
   * inserting PAM lines after `common-*` includes
@@ -79,12 +100,24 @@
   * `ssh overlay print-sshd-config`
   * `ssh overlay print-nsswitch-config`
   * `ssh overlay print-pam-config`
+  * `ssh overlay install-hooks`
+  * `ssh overlay hook-status`
+  * `ssh overlay hook-disable`
+  * `ssh overlay hook-restore-backup`
 * daemon/overlay tests for:
   * forced-command rendering for static or dynamic blacklist hits
   * runtime trap-username overlay rendering
   * runtime fail-open when daemon or containment is inactive
+* installer tests for:
+  * backup creation before first managed edit
+  * patch-style preview generation with changed hunks only and 10 lines of context
+  * CLI diff preview colorization staying outside the backend renderer
+  * idempotent re-run of `install-hooks`
+  * `hook-disable` restoring original NSS lines and removing additive SSH/PAM blocks
+  * `hook-restore-backup` restoring the original files exactly
+  * fail-closed behavior when conflicts or required anchors are detected, while allowing missing `initgroups:`
 * host validation assertions:
-  * `sshd -t` succeeds after merging the sample fragments
+  * `sshd -t` succeeds after `install-hooks`
   * a legitimate real user still reaches the real host account space
 
 ### 7. Wrong vs Correct

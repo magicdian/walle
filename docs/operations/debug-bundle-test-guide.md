@@ -131,11 +131,13 @@ sudo ldconfig
 
 ## Enable The SSH Overlay
 
-Manually merge the shipped samples:
+Install the managed hooks:
 
-* `/usr/local/lib/walle/walle-ssh-overlay.conf.sample` into `sshd_config`
-* `/usr/local/lib/walle/walle-nsswitch.conf.sample` into `/etc/nsswitch.conf`
-* `/usr/local/lib/walle/walle-sshd-pam.conf.sample` into `/etc/pam.d/sshd`
+```bash
+sudo /usr/local/bin/walle ssh overlay install-hooks
+```
+
+Review the preview, confirm the changes, then validate `sshd` before restart.
 
 Validate `sshd` before restart:
 
@@ -317,9 +319,10 @@ Check:
 
 ## Cleanup
 
-Disable overlay edits manually if the host should return to baseline behavior, then uninstall:
+Disable overlay edits through the managed hook command if the host should return to baseline behavior, then uninstall:
 
 ```bash
+sudo /usr/local/bin/walle ssh overlay hook-disable
 sudo /usr/local/bin/walle uninstall
 ```
 
