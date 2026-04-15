@@ -660,3 +660,37 @@ Archived the SSH overlay task tree and recorded the completed NSS/PAM/sshjail ov
 ### Next Steps
 
 - None - task complete
+
+
+## Session 19: SSH overlay hook lifecycle
+
+**Date**: 2026-04-15
+**Task**: SSH overlay hook lifecycle
+**Branch**: `dev`
+
+### Summary
+
+Implemented managed SSH overlay hook lifecycle under 'walle ssh overlay' with strict preview-confirm-apply semantics, backups, managed block markers, disable/restore/status commands, hunk-scoped diff preview with optional ANSI colors, and the Debian initgroups fallback. Synced README, operations docs, backend specs, archived the task, and recorded the tested workflow.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5967b28` | (see git log) |
+| `df5c02e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

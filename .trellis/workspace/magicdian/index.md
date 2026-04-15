@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 18
+- **Total Sessions**: 19
 - **Last Active**: 2026-04-15
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~662 | Active |
+| `journal-1.md` | ~696 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -27,8 +27,9 @@
 ## Session History
 
 <!-- @@@auto:session-history -->
-| # | Date | Title | Commits |
-|---|------|-------|---------|
+| # | Date | Title | Commits | Branch |
+|---|------|-------|---------|--------|
+| 19 | 2026-04-15 | SSH overlay hook lifecycle | `5967b28`, `df5c02e` | `dev` |
 | 18 | 2026-04-15 | Commit SSH overlay traps and debug bundle integration | `15727a1` |
 | 17 | 2026-04-14 | SSH overlay completion snapshot | - |
 | 16 | 2026-04-14 | Harden XDP fallback and SSH ingestion startup | `353a504` |
