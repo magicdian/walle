@@ -1,14 +1,14 @@
 {
   "title": "Migrate to v0.4.0",
   "description": "Breaking change migration from v0.3.10 to v0.4.0",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": "migration",
   "priority": "P1",
   "creator": "trellis-update",
   "assignee": "magicdian",
   "createdAt": "2026-04-15",
-  "completedAt": null,
+  "completedAt": "2026-04-15",
   "branch": null,
   "base_branch": null,
   "worktree_path": null,
@@ -31,7 +31,7 @@
       "action": "test"
     }
   ],
-  "commit": null,
+  "commit": "4993feb",
   "pr_url": null,
   "subtasks": [],
   "children": [],
