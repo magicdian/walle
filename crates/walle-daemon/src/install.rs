@@ -4,6 +4,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use similar::TextDiff;
 use crate::ssh_overlay::{
     render_nsswitch_config_fragment, render_pam_config_fragment, render_sshd_config_fragment,
     render_trap_login_shell_wrapper,
@@ -1151,137 +1152,13 @@ fn from_lines(lines: &[String]) -> String {
 fn render_unified_diff(path: &Path, before: &str, after: &str) -> String {
     const CONTEXT_LINES: usize = 10;
 
-    let before_lines = to_lines(before);
-    let after_lines = to_lines(after);
-    let ops = build_diff_ops(&before_lines, &after_lines);
-    let mut output = String::new();
-    output.push_str(&format!("--- {}\n", path.display()));
-    output.push_str(&format!("+++ {}\n", path.display()));
-
-    let changed_indices = ops
-        .iter()
-        .enumerate()
-        .filter_map(|(index, op)| (!matches!(op, DiffOp::Equal(_))).then_some(index))
-        .collect::<Vec<_>>();
-    if changed_indices.is_empty() {
-        return output;
-    }
-
-    for (start, end) in diff_hunk_ranges(&changed_indices, ops.len(), CONTEXT_LINES) {
-        let (old_start, new_start) = diff_positions_before(&ops, start);
-        let old_count = diff_old_line_count(&ops[start..end]);
-        let new_count = diff_new_line_count(&ops[start..end]);
-        output.push_str(&format!(
-            "@@ -{},{} +{},{} @@\n",
-            old_start + 1,
-            old_count,
-            new_start + 1,
-            new_count
-        ));
-        for op in &ops[start..end] {
-            match op {
-                DiffOp::Equal(line) => output.push_str(&format!(" {}\n", line)),
-                DiffOp::Delete(line) => output.push_str(&format!("-{}\n", line)),
-                DiffOp::Insert(line) => output.push_str(&format!("+{}\n", line)),
-            }
-        }
-    }
-    output
-}
-
-enum DiffOp {
-    Equal(String),
-    Delete(String),
-    Insert(String),
-}
-
-fn build_diff_ops(before_lines: &[String], after_lines: &[String]) -> Vec<DiffOp> {
-    let n = before_lines.len();
-    let m = after_lines.len();
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i][j] = if before_lines[i] == after_lines[j] {
-                dp[i + 1][j + 1] + 1
-            } else {
-                dp[i + 1][j].max(dp[i][j + 1])
-            };
-        }
-    }
-
-    let mut i = 0usize;
-    let mut j = 0usize;
-    let mut ops = Vec::new();
-    while i < n && j < m {
-        if before_lines[i] == after_lines[j] {
-            ops.push(DiffOp::Equal(before_lines[i].clone()));
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            ops.push(DiffOp::Delete(before_lines[i].clone()));
-            i += 1;
-        } else {
-            ops.push(DiffOp::Insert(after_lines[j].clone()));
-            j += 1;
-        }
-    }
-    while i < n {
-        ops.push(DiffOp::Delete(before_lines[i].clone()));
-        i += 1;
-    }
-    while j < m {
-        ops.push(DiffOp::Insert(after_lines[j].clone()));
-        j += 1;
-    }
-    ops
-}
-
-fn diff_hunk_ranges(
-    changed_indices: &[usize],
-    total_ops: usize,
-    context_lines: usize,
-) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    for &index in changed_indices {
-        let start = index.saturating_sub(context_lines);
-        let end = (index + context_lines + 1).min(total_ops);
-        if let Some((_, previous_end)) = ranges.last_mut()
-            && start <= *previous_end
-        {
-            *previous_end = (*previous_end).max(end);
-            continue;
-        }
-        ranges.push((start, end));
-    }
-    ranges
-}
-
-fn diff_positions_before(ops: &[DiffOp], offset: usize) -> (usize, usize) {
-    let mut old_line = 0usize;
-    let mut new_line = 0usize;
-    for op in &ops[..offset] {
-        match op {
-            DiffOp::Equal(_) => {
-                old_line += 1;
-                new_line += 1;
-            }
-            DiffOp::Delete(_) => old_line += 1,
-            DiffOp::Insert(_) => new_line += 1,
-        }
-    }
-    (old_line, new_line)
-}
-
-fn diff_old_line_count(ops: &[DiffOp]) -> usize {
-    ops.iter()
-        .filter(|op| matches!(op, DiffOp::Equal(_) | DiffOp::Delete(_)))
-        .count()
-}
-
-fn diff_new_line_count(ops: &[DiffOp]) -> usize {
-    ops.iter()
-        .filter(|op| matches!(op, DiffOp::Equal(_) | DiffOp::Insert(_)))
-        .count()
+    let path_display = path.display().to_string();
+    TextDiff::from_lines(before, after)
+        .unified_diff()
+        .context_radius(CONTEXT_LINES)
+        .header(path_display.as_str(), path_display.as_str())
+        .missing_newline_hint(false)
+        .to_string()
 }
 
 #[cfg(target_os = "linux")]
@@ -2178,12 +2055,15 @@ mod tests {
         let rendered =
             super::render_unified_diff(PathBuf::from("/tmp/example").as_path(), &before, &after);
 
-        assert!(rendered.contains("@@ -10,21 +10,21 @@"));
+        assert!(rendered.contains("--- /tmp/example"));
+        assert!(rendered.contains("+++ /tmp/example"));
+        assert!(rendered.contains("@@"));
         assert!(rendered.contains(" alpha-10"));
         assert!(rendered.contains("-alpha-20"));
         assert!(rendered.contains("+beta-20"));
         assert!(rendered.contains(" alpha-30"));
         assert!(!rendered.contains(" alpha-09"));
         assert!(!rendered.contains(" alpha-31"));
+        assert!(!rendered.contains('\u{1b}'));
     }
 }

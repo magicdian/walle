@@ -11,6 +11,7 @@ path = "src/lib.rs"
 anyhow.workspace = true
 rand.workspace = true
 russh.workspace = true
+similar = "2.7"
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
