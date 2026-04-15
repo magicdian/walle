@@ -694,3 +694,37 @@ Implemented managed SSH overlay hook lifecycle under 'walle ssh overlay' with st
 ### Next Steps
 
 - None - task complete
+
+
+## Session 20: Migrate overlay diff preview to similar
+
+**Date**: 2026-04-15
+**Task**: Migrate overlay diff preview to similar
+**Branch**: `dev`
+
+### Summary
+
+Replaced the SSH overlay install-hooks preview renderer with the Apache-2.0 similar crate via Cargo, removing the hand-rolled diff/LCS implementation while preserving the existing contract: changed hunks only, 10 lines of context, plain-text backend output, and CLI-side ANSI colorization. Revalidated daemon and CLI tests, archived the brainstorm task, and recorded the migration.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `86a92dd` | (see git log) |
+| `0f1abad` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
